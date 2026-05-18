@@ -1,6 +1,13 @@
 name: docker-build-and-render-deploy
 
 on:
+  # ----------------------------------------------------------------------------
+  # 当 main 分支有新的 push 时：
+  # 1. 校验 Go 构建
+  # 2. 构建 Docker 镜像
+  # 3. 推送到 GHCR
+  # 4. 触发 Render 部署
+  # ----------------------------------------------------------------------------
   push:
     branches:
       - main
@@ -9,18 +16,34 @@ on:
     paths-ignore:
       - "**/*.md"
       - "docs/**"
+
+  # ----------------------------------------------------------------------------
+  # Pull Request 仅做构建校验，不推送镜像、不触发部署
+  # ----------------------------------------------------------------------------
   pull_request:
     branches:
       - main
     paths-ignore:
       - "**/*.md"
       - "docs/**"
+
+  # ----------------------------------------------------------------------------
+  # 支持手动触发
+  # ----------------------------------------------------------------------------
   workflow_dispatch:
 
-# 同一分支重复提交时，自动取消旧任务，避免浪费 CI 资源
+# ------------------------------------------------------------------------------
+# 同一分支重复提交时，取消前一个正在运行的任务，节省 CI 资源
+# ------------------------------------------------------------------------------
 concurrency:
   group: docker-render-${{ github.ref }}
   cancel-in-progress: true
+
+# ------------------------------------------------------------------------------
+# 提前切换到 Node 24，规避 GitHub Actions Node20 弃用问题
+# ------------------------------------------------------------------------------
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   verify:
@@ -28,24 +51,41 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # 检出源码
       - name: Checkout source
         uses: actions/checkout@v4
 
+      # 安装 Go，并开启模块缓存
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
 
-      # 没有测试文件时，go test ./... 仍然能完成编译级校验
+      # ----------------------------------------------------------------------------
+      # 运行 go test ./...
+      # 说明：
+      # 1. 即使没有测试文件，也会完成包级编译校验
+      # 2. 能尽早暴露类型错误、接口不匹配等问题
+      # ----------------------------------------------------------------------------
       - name: Run Go tests
         run: go test ./...
+
+      # ----------------------------------------------------------------------------
+      # 显式验证服务入口是否可构建
+      # 避免将来入口路径变化后，仅 Dockerfile 报错，不易定位
+      # ----------------------------------------------------------------------------
+      - name: Build server binary
+        run: go build -trimpath -buildvcs=false ./cmd/server
 
   docker:
     name: Build Docker Image
     runs-on: ubuntu-latest
     needs: verify
 
+    # ----------------------------------------------------------------------------
+    # 需要 packages: write，才能向 GHCR 推送镜像
+    # ----------------------------------------------------------------------------
     permissions:
       contents: read
       packages: write
@@ -54,19 +94,25 @@ jobs:
       image_name: ${{ steps.image.outputs.name }}
 
     steps:
+      # 检出源码
       - name: Checkout source
         uses: actions/checkout@v4
 
+      # 计算镜像名，统一转小写
       - name: Compute image name
         id: image
         shell: bash
         run: |
           echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
+      # 安装 Docker Buildx
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # PR 构建不推送，push/tag 才登录仓库
+      # ----------------------------------------------------------------------------
+      # PR 构建只验证镜像能否构建，不推送镜像，因此也不需要登录 GHCR
+      # push/tag 才登录并推送
+      # ----------------------------------------------------------------------------
       - name: Login to GHCR
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
@@ -75,6 +121,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # ----------------------------------------------------------------------------
+      # 自动生成镜像标签与 OCI metadata
+      #
+      # 示例标签：
+      # - latest（仅默认分支）
+      # - main
+      # - v1.0.0
+      # - sha-abcdef1
+      # ----------------------------------------------------------------------------
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -88,6 +143,7 @@ jobs:
             type=ref,event=tag
             type=sha,prefix=sha-
 
+      # 生成构建元信息
       - name: Compute build vars
         id: vars
         shell: bash
@@ -102,26 +158,31 @@ jobs:
           echo "commit=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
           echo "build_time=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
 
+      # ----------------------------------------------------------------------------
+      # 构建并（按条件）推送 Docker 镜像
+      #
+      # 说明：
+      # 1. 仅构建 linux/amd64，减少 CI 时间，适配 Render 常见部署目标
+      # 2. provenance/sbom 关闭，减少构建与推送负担，提高兼容性
+      # 3. 使用 GHA cache 加速 Docker Buildx 构建
+      # ----------------------------------------------------------------------------
       - name: Build and (optionally) push Docker image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
 
-          # Render 通常运行在 amd64，优先只构建 amd64，减少构建时长
           platforms: linux/amd64
 
-          # PR 只验证可构建；push/tag 才推送镜像
+          # PR 只验证可构建；push/tag 才推送
           push: ${{ github.event_name != 'pull_request' }}
 
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
-          # 关闭 provenance / sbom，减少构建与推送开销，提升兼容性
           provenance: false
           sbom: false
 
-          # 使用 GitHub Actions 原生缓存，加速后续构建
           cache-from: type=gha,scope=aigw-docker
           cache-to: type=gha,mode=max,scope=aigw-docker
 
@@ -135,10 +196,14 @@ jobs:
     runs-on: ubuntu-latest
     needs: docker
 
-    # 只在 main 分支 push 后触发 Render 部署
+    # ----------------------------------------------------------------------------
+    # 仅 main 分支 push 成功后，触发 Render 自动部署
+    # PR / tag 默认不触发
+    # ----------------------------------------------------------------------------
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
+      # 通过 Render Deploy Hook 触发更新
       - name: Trigger Render deploy hook
         shell: bash
         env:
