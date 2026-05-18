@@ -1,0 +1,30 @@
+# 二进制
+aistudio-gemini-gateway
+/bin/
+/dist/
+
+# 依赖缓存
+/vendor/
+
+# 测试覆盖率
+coverage.out
+coverage.html
+
+# 日志
+logs/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 敏感配置（生产环境的真实配置不应提交）
+# 默认示例 config.yaml 可以提交，但包含真实密钥的不应提交
+# config.yaml

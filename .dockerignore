@@ -1,0 +1,35 @@
+# Git
+.git
+.gitignore
+.github
+
+# 文档
+*.md
+LICENSE
+docs/
+
+# 开发与 IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 测试与临时文件
+*_test.go
+testdata/
+coverage.out
+coverage.html
+
+# 构建产物
+bin/
+dist/
+aistudio-gemini-gateway
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 日志
+logs/
+*.log

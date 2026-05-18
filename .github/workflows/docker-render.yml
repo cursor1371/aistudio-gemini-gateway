@@ -1,0 +1,153 @@
+name: docker-build-and-render-deploy
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+  pull_request:
+    branches:
+      - main
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+  workflow_dispatch:
+
+# 同一分支重复提交时，自动取消旧任务，避免浪费 CI 资源
+concurrency:
+  group: docker-render-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify Go Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # 没有测试文件时，go test ./... 仍然能完成编译级校验
+      - name: Run Go tests
+        run: go test ./...
+
+  docker:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: verify
+
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      image_name: ${{ steps.image.outputs.name }}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Compute image name
+        id: image
+        shell: bash
+        run: |
+          echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # PR 构建不推送，push/tag 才登录仓库
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+          flavor: |
+            latest=false
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,prefix=sha-
+
+      - name: Compute build vars
+        id: vars
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME}"
+          else
+            VERSION="${GITHUB_SHA::12}"
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "commit=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "build_time=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+
+      - name: Build and (optionally) push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+
+          # Render 通常运行在 amd64，优先只构建 amd64，减少构建时长
+          platforms: linux/amd64
+
+          # PR 只验证可构建；push/tag 才推送镜像
+          push: ${{ github.event_name != 'pull_request' }}
+
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+          # 关闭 provenance / sbom，减少构建与推送开销，提升兼容性
+          provenance: false
+          sbom: false
+
+          # 使用 GitHub Actions 原生缓存，加速后续构建
+          cache-from: type=gha,scope=aigw-docker
+          cache-to: type=gha,mode=max,scope=aigw-docker
+
+          build-args: |
+            VERSION=${{ steps.vars.outputs.version }}
+            COMMIT=${{ steps.vars.outputs.commit }}
+            BUILD_TIME=${{ steps.vars.outputs.build_time }}
+
+  deploy-render:
+    name: Trigger Render Deploy
+    runs-on: ubuntu-latest
+    needs: docker
+
+    # 只在 main 分支 push 后触发 Render 部署
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Trigger Render deploy hook
+        shell: bash
+        env:
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          if [[ -z "${RENDER_DEPLOY_HOOK_URL}" ]]; then
+            echo "Missing secret: RENDER_DEPLOY_HOOK_URL" >&2
+            exit 1
+          fi
+
+          curl --fail --silent --show-error --request POST "${RENDER_DEPLOY_HOOK_URL}"
+          echo "Render deploy triggered successfully."
