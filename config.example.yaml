@@ -237,10 +237,10 @@ models:
   # alias  对外别名
   # target 真实模型名（必须在 entries / embedded 中存在）
   # expose 是否在 /v1beta/models 列表中显示
-  aliases:
-    - alias: "gemini-pro"
-      target: "gemini-2.5-pro"
-      expose: true
+  #   aliases:
+  #     - alias: "gemini-pro"
+  #       target: "gemini-2.5-pro"
+  #       expose: true
 
   # 当 source=custom 时，在此定义模型列表（不得为空）
   # entries:

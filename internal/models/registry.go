@@ -51,11 +51,18 @@ type Registry struct {
 }
 
 // builtInAliases 是内置兼容别名。
-// 这些别名独立于用户配置，用于保持关键模型名的向后兼容。
+// 这些别名不依赖用户配置，用于保持关键模型名的向后兼容。
 var builtInAliases = []config.ModelAlias{
 	{
+		// 兼容旧名 gemini-2.5-flash-image-preview
 		Alias:  "gemini-2.5-flash-image-preview",
 		Target: "gemini-2.5-flash-image",
+		Expose: false,
+	},
+	{
+		// 兼容旧名 gemini-3.1-flash-lite-preview（已去掉 -preview 后缀）
+		Alias:  "gemini-3.1-flash-lite-preview",
+		Target: "gemini-3.1-flash-lite",
 		Expose: false,
 	},
 }

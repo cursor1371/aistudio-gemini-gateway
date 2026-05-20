@@ -86,18 +86,20 @@ var (
 // 内置模型名称列表（仅用于配置校验时判断 alias target 是否合法）
 // ---------------------------------------------------------------------------
 
+// DefaultEmbeddedModelNames 仅用于配置校验。
+// 该列表需要与 internal/models/embedded.go 保持一致。
 var DefaultEmbeddedModelNames = []string{
 	"gemini-2.5-pro",
 	"gemini-2.5-flash",
 	"gemini-2.5-flash-lite",
-	"gemini-3-pro-preview",
+	"gemini-2.5-flash-image",
 	"gemini-3.1-pro-preview",
 	"gemini-3-flash-preview",
-	"gemini-3.1-flash-lite-preview",
+	"gemini-3.5-flash",
+	"gemini-3.1-flash-lite",
 	"gemini-pro-latest",
 	"gemini-flash-latest",
 	"gemini-flash-lite-latest",
-	"gemini-2.5-flash-image",
 }
 
 // ---------------------------------------------------------------------------
