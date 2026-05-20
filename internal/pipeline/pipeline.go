@@ -943,7 +943,21 @@ func (p *Pipeline) classifyTransportError(err error, requestCtx *RequestContext,
 	)
 }
 
+// classifyHTTPStatus 将上游 HTTP 状态码分类为统一的 GatewayError。
+//
+// 核心职责：
+// 1. 从上游响应体中提取原始错误信息
+// 2. 判断该错误是否可重试、是否需要触发 Provider 冷却
+// 3. 构造面向调用方的 publicMessage
+//
+// publicMessage 策略：
+// 当前项目是 Gemini 标准化网关，上游是 Google 公开 API。
+// 透传上游原始错误信息不会暴露网关内部架构细节，
+// 且调用方（开发者 / IDE / Agent）需要原始信息排障。
+// 因此所有状态码统一透传上游错误详情，仅对特定状态码补充中文前缀提示。
 func (p *Pipeline) classifyHTTPStatus(status int, headers http.Header, body []byte, requestCtx *RequestContext, provider *service.RuntimeProvider) *service.GatewayError {
+	// 从上游响应体中提取错误信息。
+	// 尝试 JSON 路径：error.message -> message -> error，最后回退到截断原文。
 	message := extractErrorMessage(body)
 	if message == "" {
 		message = http.StatusText(status)
@@ -952,36 +966,81 @@ func (p *Pipeline) classifyHTTPStatus(status int, headers http.Header, body []by
 		message = "upstream http error"
 	}
 
+	// 解析 Retry-After 响应头。
+	// 上游返回 429 / 503 时通常会附带此头，用于告知客户端应等待多久后重试。
 	retryAfter := parseRetryAfterHeader(headers)
-	lowerMessage := strings.ToLower(message)
 
+	// -------------------------------------------------------------------------
+	// 判断该错误是否可重试、是否应触发 Provider 冷却。
+	//
+	// 可重试（retryable）：Pipeline 会在 bootstrap 阶段自动切换到其他 Provider 重试。
+	// 触发冷却（cooldown）：该 Provider 会进入冷却期，一段时间内不再被选中。
+	//
+	// 规则：
+	// - 429（限流）：可重试 + 冷却
+	// - 500（内部错误）：可重试 + 冷却（上游临时故障）
+	// - 502（网关错误）：可重试 + 冷却
+	// - 503（服务不可用）：可重试 + 冷却
+	// - 504（网关超时）：可重试 + 冷却
+	// - 响应体中包含临时性关键词（如 rate limit / quota）：可重试 + 冷却
+	// - 其余状态码（如 400/401/403/404）：不可重试，不冷却
+	// -------------------------------------------------------------------------
 	retryable := false
 	cooldown := false
 
 	switch status {
-	case http.StatusTooManyRequests:
+	case http.StatusTooManyRequests: // 429
 		retryable = true
 		cooldown = true
-	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout, http.StatusInternalServerError:
+	case http.StatusInternalServerError: // 500
+		retryable = true
+		cooldown = true
+	case http.StatusBadGateway: // 502
+		retryable = true
+		cooldown = true
+	case http.StatusServiceUnavailable: // 503
+		retryable = true
+		cooldown = true
+	case http.StatusGatewayTimeout: // 504
 		retryable = true
 		cooldown = true
 	}
 
-	if containsTemporaryHint(lowerMessage) {
+	// 即使状态码不是典型的临时错误，如果响应体中包含限流/配额相关关键词，
+	// 也按临时错误处理，允许重试并触发冷却。
+	if containsTemporaryHint(strings.ToLower(message)) {
 		retryable = true
 		cooldown = true
 	}
 
-	publicMessage := "上游服务返回错误"
+	// -------------------------------------------------------------------------
+	// 构造面向调用方的 publicMessage。
+	//
+	// 默认直接透传上游原始错误信息。
+	// 对特定状态码补充中文前缀，帮助调用方快速定位问题类别，
+	// 同时保留上游原始详情以便深入排障。
+	// -------------------------------------------------------------------------
+	publicMessage := message
+
 	switch status {
-	case http.StatusNotFound:
-		publicMessage = "上游模型不存在"
-	case http.StatusUnauthorized, http.StatusForbidden:
-		publicMessage = "上游认证失败"
-	case http.StatusTooManyRequests:
-		publicMessage = "上游限流或配额不足"
-	case http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-		publicMessage = "上游服务暂时不可用"
+	case http.StatusBadRequest: // 400
+		publicMessage = "上游请求参数错误: " + message
+	case http.StatusUnauthorized: // 401
+		publicMessage = "上游认证失败: " + message
+	case http.StatusForbidden: // 403
+		publicMessage = "上游权限不足: " + message
+	case http.StatusNotFound: // 404
+		publicMessage = "上游模型不存在: " + message
+	case http.StatusTooManyRequests: // 429
+		publicMessage = "上游限流或配额不足: " + message
+	case http.StatusInternalServerError: // 500
+		publicMessage = "上游内部错误: " + message
+	case http.StatusBadGateway: // 502
+		publicMessage = "上游网关错误: " + message
+	case http.StatusServiceUnavailable: // 503
+		publicMessage = "上游服务暂时不可用: " + message
+	case http.StatusGatewayTimeout: // 504
+		publicMessage = "上游网关超时: " + message
 	}
 
 	return service.NewUpstreamHTTPError(
