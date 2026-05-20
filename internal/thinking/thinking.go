@@ -45,7 +45,9 @@ func (m ThinkingMode) String() string {
 	}
 }
 
-// ThinkingLevel 表示离散 thinking 等级。
+// ThinkingLevel 表示离散 thinking 等级（内部使用小写表示）。
+// 注意：内部始终使用小写便于配置、suffix 解析与比较。
+// 发往上游 Gemini API 前，必须通过 thinkingLevelToAPIEnum() 转换为官方大写枚举值。
 type ThinkingLevel string
 
 const (
@@ -64,6 +66,44 @@ type ThinkingConfig struct {
 	Mode   ThinkingMode
 	Budget int64
 	Level  ThinkingLevel
+}
+
+// ---------------------------------------------------------------------------
+// 内部 Level -> Gemini API 枚举值转换
+// ---------------------------------------------------------------------------
+
+// thinkingLevelToAPIEnum 将内部小写 level 转换为 Gemini API 官方大写枚举值。
+//
+// Gemini API 文档中 ThinkingLevel 枚举定义：
+//   - THINKING_LEVEL_UNSPECIFIED（默认值，不使用）
+//   - MINIMAL
+//   - LOW
+//   - MEDIUM
+//   - HIGH
+//
+// 注意：
+//   - 内部的 xhigh 和 max 没有对应的官方枚举值，回退映射到 HIGH。
+//   - 对于未知 level，做 strings.ToUpper 兜底。
+func thinkingLevelToAPIEnum(level ThinkingLevel) string {
+	switch level {
+	case LevelMinimal:
+		return "MINIMAL"
+	case LevelLow:
+		return "LOW"
+	case LevelMedium:
+		return "MEDIUM"
+	case LevelHigh:
+		return "HIGH"
+	case LevelXHigh:
+		// Gemini API 无 XHIGH 枚举，回退到 HIGH。
+		return "HIGH"
+	case LevelMax:
+		// Gemini API 无 MAX 枚举，回退到 HIGH。
+		return "HIGH"
+	default:
+		// 未知 level 统一转大写作为最后兜底。
+		return strings.ToUpper(strings.TrimSpace(string(level)))
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -155,6 +195,8 @@ func ParseLevelSuffix(rawSuffix string) (ThinkingLevel, bool) {
 
 // ExtractConfig 从 Gemini 请求体中提取 thinking 配置。
 // 优先级：thinkingLevel > thinkingBudget。
+// 注意：客户端传入的 level 值可能是大写（如 "HIGH"）或小写（如 "high"），
+// 这里统一转为内部小写表示。
 func ExtractConfig(body []byte) ThinkingConfig {
 	if len(body) == 0 || !gjson.ValidBytes(body) {
 		return ThinkingConfig{}
@@ -228,6 +270,7 @@ func StripThinkingConfig(body []byte) []byte {
 // 注意：
 //   - 未知模型（modelInfo == nil）不允许携带 thinking 配置，会直接返回错误。
 //   - 模型不支持 thinking 时，会静默剥离 thinkingConfig。
+//   - 最终写入请求体的 thinkingLevel 值为 Gemini API 官方大写枚举（MINIMAL/LOW/MEDIUM/HIGH）。
 func Apply(body []byte, model string, modelInfo *service.ModelInfo, cfg cfgpkg.GeminiThinkingConfig) ([]byte, error) {
 	// 全局关闭 thinking 时直接返回。
 	if strings.EqualFold(strings.TrimSpace(cfg.Mode), "off") {
@@ -321,7 +364,7 @@ func ValidateConfig(config ThinkingConfig, modelInfo *service.ModelInfo, strictV
 	// 根据模型能力类型做格式转换。
 	switch capability {
 	case capabilityBudgetOnly:
-		// 仅支持 budget 的模型，需要把 level 转成 budget。
+		// 仅支持 budget 的模型（如 Gemini 2.x），需要把 level 转成 budget。
 		if config.Mode == ModeLevel {
 			if config.Level == LevelAuto {
 				break
@@ -349,7 +392,10 @@ func ValidateConfig(config ThinkingConfig, modelInfo *service.ModelInfo, strictV
 		}
 
 	case capabilityHybrid:
-		// 混合能力模型（如 Gemini 3.x）：保留原始格式不做转换。
+		// 混合能力模型（如 Gemini 3.x）：
+		// 支持 thinkingLevel 和 thinkingBudget 两种格式。
+		// 保留用户原始选择的格式，不做强制转换。
+		// 上游 Gemini API 官方文档建议 Gemini 3 及以上使用 thinkingLevel。
 	}
 
 	// 处理特殊等级到模式的归一化。
@@ -408,7 +454,7 @@ func ValidateConfig(config ThinkingConfig, modelInfo *service.ModelInfo, strictV
 		config.Budget = clampBudget(config.Budget, support)
 	}
 
-	// 对 level-only / hybrid 模型，当 ModeNone 需要"思考但不显示"时，
+	// 对 level-capable 模型，当 ModeNone 需要"思考但不显示"时，
 	// 给出最低 level，后续 applyLevelFormat 会同时设 includeThoughts=false。
 	if config.Mode == ModeNone && len(support.Levels) > 0 && config.Level == "" {
 		config.Level = ThinkingLevel(strings.ToLower(strings.TrimSpace(support.Levels[0])))
@@ -490,6 +536,10 @@ func applyGemini(body []byte, config ThinkingConfig, modelInfo *service.ModelInf
 }
 
 // applyLevelFormat 以 thinkingLevel 格式写入请求体。
+//
+// 关键点：写入上游的 thinkingLevel 值必须是 Gemini API 官方大写枚举，
+// 例如 "HIGH"，而不是内部小写的 "high"。
+// 转换通过 thinkingLevelToAPIEnum() 完成。
 func applyLevelFormat(body []byte, config ThinkingConfig) []byte {
 	// 先清除所有可能冲突的旧字段。
 	result, _ := sjson.DeleteBytes(body, "generationConfig.thinkingConfig.thinkingBudget")
@@ -501,7 +551,8 @@ func applyLevelFormat(body []byte, config ThinkingConfig) []byte {
 		// "思考但不显示"：设置 level 但 includeThoughts=false。
 		result, _ = sjson.SetBytes(result, "generationConfig.thinkingConfig.includeThoughts", false)
 		if config.Level != "" {
-			result, _ = sjson.SetBytes(result, "generationConfig.thinkingConfig.thinkingLevel", string(config.Level))
+			// 写入上游时使用官方大写枚举值。
+			result, _ = sjson.SetBytes(result, "generationConfig.thinkingConfig.thinkingLevel", thinkingLevelToAPIEnum(config.Level))
 		}
 		return result
 	}
@@ -510,7 +561,8 @@ func applyLevelFormat(body []byte, config ThinkingConfig) []byte {
 		return result
 	}
 
-	result, _ = sjson.SetBytes(result, "generationConfig.thinkingConfig.thinkingLevel", string(config.Level))
+	// 写入上游时使用官方大写枚举值。
+	result, _ = sjson.SetBytes(result, "generationConfig.thinkingConfig.thinkingLevel", thinkingLevelToAPIEnum(config.Level))
 
 	includeThoughts := extractIncludeThoughts(body, true)
 	result, _ = sjson.SetBytes(result, "generationConfig.thinkingConfig.includeThoughts", includeThoughts)
