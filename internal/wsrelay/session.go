@@ -98,6 +98,8 @@ func (s *session) run() {
 			s.cleanup(err)
 			return
 		}
+		_ = s.conn.SetReadDeadline(time.Now().Add(s.manager.readTimeout))
+
 		s.touch(time.Now())
 		s.dispatch(msg)
 	}

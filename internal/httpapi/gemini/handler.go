@@ -471,8 +471,21 @@ func writeSSEPayload(w http.ResponseWriter, payload []byte) {
 	_, _ = w.Write([]byte("\n\n"))
 }
 
-// buildErrorBody 构造 Gemini 风格的 JSON 错误体。
+// buildErrorBody 构造 SSE error 事件的 data 内容。
+// 优先透传上游原始错误响应体，保留完整的错误详情。
 func buildErrorBody(err error) []byte {
+	// 优先尝试获取上游原始响应体。
+	type rawBodyProvider interface {
+		RawResponseBody() []byte
+	}
+	var rawProvider rawBodyProvider
+	if errors.As(err, &rawProvider) && rawProvider != nil {
+		if rawBody := rawProvider.RawResponseBody(); len(rawBody) > 0 && json.Valid(rawBody) {
+			return rawBody
+		}
+	}
+
+	// 回退：构造标准 Gemini 风格错误 JSON。
 	type httpStatusProvider interface {
 		HTTPStatus() int
 		SafeMessage() string

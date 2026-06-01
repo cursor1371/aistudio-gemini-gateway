@@ -108,6 +108,8 @@ type GatewayError struct {
 	Action Action
 	// Metadata 是附加元数据。
 	Metadata map[string]any
+	// RawBody 存储上游原始响应体。
+	RawBody []byte
 	// Cause 是底层原始错误。
 	Cause error
 }
@@ -163,6 +165,15 @@ func (e *GatewayError) RetryAfterDuration() time.Duration {
 	return e.RetryAfter
 }
 
+// RawResponseBody 返回上游原始响应体。
+// 该方法供 HTTP 输出层判断是否应透传上游完整错误。
+func (e *GatewayError) RawResponseBody() []byte {
+	if e == nil {
+		return nil
+	}
+	return e.RawBody
+}
+
 // Clone 深拷贝错误对象。
 func (e *GatewayError) Clone() *GatewayError {
 	if e == nil {
@@ -174,6 +185,10 @@ func (e *GatewayError) Clone() *GatewayError {
 		for k, v := range e.Metadata {
 			out.Metadata[k] = v
 		}
+	}
+	if len(e.RawBody) > 0 {
+		out.RawBody = make([]byte, len(e.RawBody))
+		copy(out.RawBody, e.RawBody)
 	}
 	return &out
 }
@@ -250,6 +265,18 @@ func WithMetadata(metadata map[string]any) ErrorOption {
 		e.Metadata = make(map[string]any, len(metadata))
 		for k, v := range metadata {
 			e.Metadata[k] = v
+		}
+	}
+}
+
+// WithRawBody 设置上游原始响应体。
+// 当上游返回非 2xx 响应时，可通过此选项携带完整的上游响应体，
+// 使 HTTP 输出层能够直接透传给客户端。
+func WithRawBody(body []byte) ErrorOption {
+	return func(e *GatewayError) {
+		if len(body) > 0 {
+			e.RawBody = make([]byte, len(body))
+			copy(e.RawBody, body)
 		}
 	}
 }

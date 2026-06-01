@@ -123,7 +123,7 @@ websocket:
   handshake-timeout: "10s"
 
   # WS 读消息超时
-  read-timeout: "60s"
+  read-timeout: "300s"
 
   # WS 写消息超时
   write-timeout: "10s"
@@ -135,7 +135,7 @@ websocket:
     # 服务端 Ping 间隔
     ping-interval: "30s"
     # 等待 Pong 超时
-    pong-timeout: "60s"
+    pong-timeout: "120s"
 
   origin:
     # Origin 校验模式：

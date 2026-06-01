@@ -254,4 +254,5 @@ var (
 	WithModel                   = core.WithModel
 	WithAction                  = core.WithAction
 	WithMetadata                = core.WithMetadata
+	WithRawBody                 = core.WithRawBody
 )

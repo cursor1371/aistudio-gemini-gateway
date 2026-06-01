@@ -16,10 +16,10 @@ const (
 
 	DefaultWebSocketPath      = "/v1/ws"
 	DefaultWSHandshakeTimeout = "10s"
-	DefaultWSReadTimeout      = "60s"
+	DefaultWSReadTimeout      = "300s"
 	DefaultWSWriteTimeout     = "10s"
 	DefaultWSPingInterval     = "30s"
-	DefaultWSPongTimeout      = "60s"
+	DefaultWSPongTimeout      = "120s"
 	DefaultWSMaxMessageSize   int64 = 64 << 20 // 64 MiB
 
 	DefaultRoutingStrategy    = "round_robin"

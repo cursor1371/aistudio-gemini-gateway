@@ -945,19 +945,20 @@ func (p *Pipeline) classifyTransportError(err error, requestCtx *RequestContext,
 
 // classifyHTTPStatus 将上游 HTTP 状态码分类为统一的 GatewayError。
 //
-// 核心职责：
-// 1. 从上游响应体中提取原始错误信息
-// 2. 判断该错误是否可重试、是否需要触发 Provider 冷却
-// 3. 构造面向调用方的 publicMessage
+// 核心策略：
+// 1. 所有上游 HTTP 错误均标记为 retryable，允许切换 Provider 重试
+// 2. 冷却策略按状态码区分：
+//    - 401/403：Provider auth 失效 → 冷却
+//    - 429：Provider 限流 → 冷却（带 Retry-After）
+//    - 5xx：Provider 上游故障 → 冷却
+//    - 400/404/其他 4xx：可能是请求本身问题 → 不冷却 Provider
+// 3. publicMessage 统一透传上游原始错误信息
 //
-// publicMessage 策略：
-// 当前项目是 Gemini 标准化网关，上游是 Google 公开 API。
-// 透传上游原始错误信息不会暴露网关内部架构细节，
-// 且调用方（开发者 / IDE / Agent）需要原始信息排障。
-// 因此所有状态码统一透传上游错误详情，仅对特定状态码补充中文前缀提示。
+// 设计原则：
+// 上游错误是 Provider 级别的，不同 Provider 可能有不同的 auth 状态、配额和可用性。
+// 只要还有未尝试的 Provider，就应该切换重试，避免中断客户端的连续任务。
 func (p *Pipeline) classifyHTTPStatus(status int, headers http.Header, body []byte, requestCtx *RequestContext, provider *service.RuntimeProvider) *service.GatewayError {
 	// 从上游响应体中提取错误信息。
-	// 尝试 JSON 路径：error.message -> message -> error，最后回退到截断原文。
 	message := extractErrorMessage(body)
 	if message == "" {
 		message = http.StatusText(status)
@@ -967,58 +968,47 @@ func (p *Pipeline) classifyHTTPStatus(status int, headers http.Header, body []by
 	}
 
 	// 解析 Retry-After 响应头。
-	// 上游返回 429 / 503 时通常会附带此头，用于告知客户端应等待多久后重试。
 	retryAfter := parseRetryAfterHeader(headers)
 
 	// -------------------------------------------------------------------------
-	// 判断该错误是否可重试、是否应触发 Provider 冷却。
-	//
-	// 可重试（retryable）：Pipeline 会在 bootstrap 阶段自动切换到其他 Provider 重试。
-	// 触发冷却（cooldown）：该 Provider 会进入冷却期，一段时间内不再被选中。
-	//
-	// 规则：
-	// - 429（限流）：可重试 + 冷却
-	// - 500（内部错误）：可重试 + 冷却（上游临时故障）
-	// - 502（网关错误）：可重试 + 冷却
-	// - 503（服务不可用）：可重试 + 冷却
-	// - 504（网关超时）：可重试 + 冷却
-	// - 响应体中包含临时性关键词（如 rate limit / quota）：可重试 + 冷却
-	// - 其余状态码（如 400/401/403/404）：不可重试，不冷却
+	// 所有上游 HTTP 错误均标记为 retryable。
+	// 上游错误是 Provider 级别的——不同 Provider 的 session、quota、auth 状态各不相同，
+	// 在一个 Provider 上失败的请求，在另一个 Provider 上可能完全正常。
+	// 只要还有未尝试的 Provider，Pipeline 就会自动切换重试。
 	// -------------------------------------------------------------------------
-	retryable := false
+	retryable := true
+
+	// -------------------------------------------------------------------------
+	// 冷却策略：
+	// - 只对明确属于"Provider 自身问题"的状态码触发冷却
+	// - 400/404 等可能是请求本身的问题，不应惩罚 Provider
+	// -------------------------------------------------------------------------
 	cooldown := false
 
 	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden: // 401, 403
+		// Provider session/auth 失效，短期内不会自愈 → 冷却
+		cooldown = true
 	case http.StatusTooManyRequests: // 429
-		retryable = true
+		// Provider 配额耗尽 → 冷却
 		cooldown = true
 	case http.StatusInternalServerError: // 500
-		retryable = true
 		cooldown = true
 	case http.StatusBadGateway: // 502
-		retryable = true
 		cooldown = true
 	case http.StatusServiceUnavailable: // 503
-		retryable = true
 		cooldown = true
 	case http.StatusGatewayTimeout: // 504
-		retryable = true
 		cooldown = true
 	}
 
-	// 即使状态码不是典型的临时错误，如果响应体中包含限流/配额相关关键词，
-	// 也按临时错误处理，允许重试并触发冷却。
+	// 响应体中包含限流/配额关键词时，也触发冷却。
 	if containsTemporaryHint(strings.ToLower(message)) {
-		retryable = true
 		cooldown = true
 	}
 
 	// -------------------------------------------------------------------------
-	// 构造面向调用方的 publicMessage。
-	//
-	// 默认直接透传上游原始错误信息。
-	// 对特定状态码补充中文前缀，帮助调用方快速定位问题类别，
-	// 同时保留上游原始详情以便深入排障。
+	// publicMessage 统一透传上游原始错误信息，对特定状态码补充中文前缀。
 	// -------------------------------------------------------------------------
 	publicMessage := message
 
@@ -1054,6 +1044,7 @@ func (p *Pipeline) classifyHTTPStatus(status int, headers http.Header, body []by
 		service.WithAction(requestCtx.Action),
 		service.WithProviderID(providerID(provider)),
 		service.WithPublicMessage(publicMessage),
+		service.WithRawBody(body),
 		service.WithMetadata(map[string]any{
 			"status_code": status,
 			"retry_after": retryAfter.String(),
@@ -1102,19 +1093,21 @@ func (p *Pipeline) applyProviderCooldown(provider *service.RuntimeProvider, err 
 	_, _ = p.registry.SetCooldown(provider.ID, until, "provider cooled down by pipeline")
 }
 
+// maxAttempts 返回本次请求最大尝试次数。
+//
+// 策略：尝试所有可用 Provider。
+// 只要还有未尝试的 Provider，就不应该把上游错误直接抛给客户端。
+// 这样可以最大限度避免因单个 Provider 的临时问题中断客户端的连续任务。
+//
+// 注意：
+// 1. 每个 Provider 最多尝试一次（通过 tried map 保证）
+// 2. 已冷却的 Provider 不会被选中（selector 负责过滤）
+// 3. 若所有 Provider 均失败，最终返回最后一个上游错误
 func (p *Pipeline) maxAttempts(providerCount int) int {
 	if providerCount <= 0 {
 		return 1
 	}
-	// bootstrapRetries 表示"额外重试次数"，总尝试次数 = 1 + retry。
-	total := 1 + maxInt(0, p.bootstrapRetries)
-	if total > providerCount {
-		total = providerCount
-	}
-	if total <= 0 {
-		total = 1
-	}
-	return total
+	return providerCount
 }
 
 // =========================

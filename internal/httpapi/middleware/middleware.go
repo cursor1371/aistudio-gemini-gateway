@@ -235,26 +235,24 @@ func CORS(cfg config.CORSConfig) Middleware {
 	}
 }
 
-// WriteError 将任意 error 转换为 Gemini 风格 JSON 错误响应。
-// 该函数可被 handler 直接复用。
-// 支持：
-// 1. http.MaxBytesError -> 413
-// 2. GatewayError -> 对应 HTTPStatus + SafeMessage + Retry-After
-// 3. 其他 error -> 500
+// WriteError 将任意 error 转成 Gemini 风格输出。
+// 优先级：
+// 1. 若错误携带上游原始响应体（RawBody），且为合法 JSON，则直接透传
+// 2. 否则按 GatewayError 的 status + safeMessage 构造 Gemini 错误 JSON
+// 3. 兜底使用 err.Error()
 func WriteError(w http.ResponseWriter, err error) {
 	if err == nil {
 		writeGeminiError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 
-	// 请求体过大。
+	// 明确处理 body 过大场景。
 	var maxBytesErr *http.MaxBytesError
 	if errors.As(err, &maxBytesErr) && maxBytesErr != nil {
 		writeGeminiError(w, http.StatusRequestEntityTooLarge, "请求体过大")
 		return
 	}
 
-	// 统一错误体系：GatewayError。
 	type httpStatusProvider interface {
 		HTTPStatus() int
 		SafeMessage() string
@@ -264,12 +262,13 @@ func WriteError(w http.ResponseWriter, err error) {
 		RetryAfterDuration() time.Duration
 	}
 
-	var provider httpStatusProvider
-	if errors.As(err, &provider) && provider != nil {
-		status := provider.HTTPStatus()
-		msg := provider.SafeMessage()
+	type rawBodyProvider interface {
+		HTTPStatus() int
+		RawResponseBody() []byte
+	}
 
-		// 若错误对象携带 Retry-After 信息，输出到响应头。
+	// 设置 Retry-After 响应头（如有）。
+	setRetryAfter := func() {
 		var retryProvider retryAfterProvider
 		if errors.As(err, &retryProvider) && retryProvider != nil {
 			if retryAfter := retryProvider.RetryAfterDuration(); retryAfter > 0 {
@@ -283,8 +282,35 @@ func WriteError(w http.ResponseWriter, err error) {
 				w.Header().Set("Retry-After", strconv.Itoa(seconds))
 			}
 		}
+	}
 
-		writeGeminiError(w, status, msg)
+	// 优先尝试透传上游原始响应体。
+	// 当上游（如 Gemini API）返回完整的错误 JSON 时，直接转发给客户端，
+	// 避免丢失 details、status 等完整错误信息。
+	var rawProvider rawBodyProvider
+	if errors.As(err, &rawProvider) && rawProvider != nil {
+		if rawBody := rawProvider.RawResponseBody(); len(rawBody) > 0 && json.Valid(rawBody) {
+			setRetryAfter()
+
+			statusCode := rawProvider.HTTPStatus()
+			if statusCode <= 0 {
+				statusCode = http.StatusInternalServerError
+			}
+
+			header := w.Header()
+			header.Set("Content-Type", "application/json; charset=utf-8")
+			header.Del("Content-Length")
+			w.WriteHeader(statusCode)
+			_, _ = w.Write(rawBody)
+			return
+		}
+	}
+
+	// 回退：按 status + safeMessage 构造 Gemini 风格错误。
+	var provider httpStatusProvider
+	if errors.As(err, &provider) && provider != nil {
+		setRetryAfter()
+		writeGeminiError(w, provider.HTTPStatus(), provider.SafeMessage())
 		return
 	}
 
