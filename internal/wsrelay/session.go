@@ -347,3 +347,14 @@ func (s *session) providerSnapshot() *service.RuntimeProvider {
 	}
 	return s.provider.Clone()
 }
+
+// PendingCount 返回当前 session 中未完成的请求数量。
+// 该信息仅用于状态总览接口，帮助诊断"请求卡住"问题。
+func (s *session) PendingCount() int {
+	if s == nil {
+		return 0
+	}
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	return len(s.pending)
+}

@@ -18,6 +18,12 @@ import (
 	"aistudio-gemini-gateway/internal/observability"
 )
 
+// StatusSource 是可选的状态总览数据源接口。
+// 若 backend 实现了此接口，则 GET / 会返回生产状态总览 JSON。
+type StatusSource interface {
+	Status(ctx context.Context) (map[string]any, error)
+}
+
 // Options 是 HTTP Server 的构造选项。
 type Options struct {
 	// Config 是网关配置。
@@ -175,6 +181,21 @@ func (s *Server) buildHandler() http.Handler {
 		withCommon(middleware.CORS(s.cfg.Access.CORS))...,
 	))
 
+	// 生产状态总览接口。
+	// GET / 返回 Provider 状态、诊断信息和最近事件。
+	// 需要通过 HTTP API 鉴权才能访问。
+	if statusSource, ok := s.backend.(StatusSource); ok {
+		rootMux.Handle("/", middleware.Chain(
+			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				s.handleStatus(w, r, statusSource)
+			}),
+			withCommon(
+				middleware.CORS(s.cfg.Access.CORS),
+				middleware.Auth(s.httpAccessManager),
+			)...,
+		))
+	}
+
 	// Gemini HTTP API：需要 CORS + BodyLimit + Auth。
 	modelsHandler := middleware.Chain(
 		http.Handler(geminiHandler),
@@ -209,6 +230,28 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		"time":   time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	writeJSON(w, http.StatusOK, payload)
+}
+
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request, source StatusSource) {
+	// 只响应精确的 GET /，其他路径返回 404。
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	if !strings.EqualFold(r.Method, http.MethodGet) {
+		w.Header().Set("Allow", http.MethodGet)
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{
+			"error": map[string]any{"code": 405, "message": "method not allowed"},
+		})
+		return
+	}
+
+	data, err := source.Status(r.Context())
+	if err != nil {
+		middleware.WriteError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, data)
 }
 
 // listenAddr 返回 HTTP 监听地址。

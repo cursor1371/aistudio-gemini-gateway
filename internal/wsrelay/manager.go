@@ -224,6 +224,26 @@ func (m *Manager) SessionCount() int {
 	return len(m.sessions)
 }
 
+// ProviderPendingCounts 返回每个在线 Provider 当前未完成的请求数量。
+// key 是小写的 provider ID。
+// 该信息仅用于状态总览接口，帮助诊断"请求卡住不结束"问题。
+func (m *Manager) ProviderPendingCounts() map[string]int {
+	if m == nil {
+		return nil
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	out := make(map[string]int, len(m.sessions))
+	for id, sess := range m.sessions {
+		if sess != nil {
+			out[id] = sess.PendingCount()
+		}
+	}
+	return out
+}
+
 // Send 向指定 Provider 发送消息，并返回响应通道。
 func (m *Manager) Send(ctx context.Context, providerID string, msg Message) (<-chan Message, error) {
 	if m == nil {
@@ -251,54 +271,15 @@ func (m *Manager) session(providerID string) *session {
 func (m *Manager) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
+	// 只接受 GET 方法。
 	if !strings.EqualFold(r.Method, http.MethodGet) {
 		w.Header().Set("Allow", http.MethodGet)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// 调试日志：打印当前实际收到的 WS 请求路径与 query。
-	// 说明：
-	// 1. 这里使用 RedactValues 对 query 做脱敏，避免 key/auth_token 明文出现在日志中
-	// 2. provider_label / provider_id 这类非敏感字段仍可见，便于排查身份提取问题
-	// 3. 此日志为临时排查用途，问题定位完成后可删除
-	if r.URL != nil {
-		m.logger.InfoContext(ctx, "wsrelay incoming request",
-			"request_id", common.RequestIDFromContext(ctx),
-			"method", r.Method,
-			"path", r.URL.Path,
-			"raw_path", r.URL.RawPath,
-			"raw_query", common.RedactValues(r.URL.Query()),
-			"origin", r.Header.Get("Origin"),
-			"remote_addr", r.RemoteAddr,
-		)
-	}
-
+	// 路径校验。
 	if r.URL == nil || r.URL.Path != m.Path() {
-		m.logger.WarnContext(ctx, "wsrelay path mismatch",
-			"request_id", common.RequestIDFromContext(ctx),
-			"expected_path", m.Path(),
-			"actual_path", func() string {
-				if r.URL == nil {
-					return ""
-				}
-				return r.URL.Path
-			}(),
-			"raw_path", func() string {
-				if r.URL == nil {
-					return ""
-				}
-				return r.URL.RawPath
-			}(),
-			"raw_query", func() any {
-				if r.URL == nil {
-					return nil
-				}
-				return common.RedactValues(r.URL.Query())
-			}(),
-			"origin", r.Header.Get("Origin"),
-			"remote_addr", r.RemoteAddr,
-		)
 		http.NotFound(w, r)
 		return
 	}

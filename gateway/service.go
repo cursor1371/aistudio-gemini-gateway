@@ -40,6 +40,11 @@ type Options struct {
 	// Logger 是日志实现。若为 nil，则基于配置自动创建 slog logger。
 	Logger Logger
 
+	// 版本信息，用于状态总览接口展示。通常由 main.go 中的 ldflags 注入值传入。
+	Version   string
+	Commit    string
+	BuildTime string
+
 	// ModelRegistry 是静态模型注册表。若为 nil，则基于配置自动创建。
 	ModelRegistry *ModelRegistry
 
@@ -65,19 +70,19 @@ type Options struct {
 // 它既可作为独立服务运行（Start），也可被宿主项目嵌入（Handler）。
 type Service struct {
 	cfg *config.Config
-
 	logger observability.Logger
-
+	// 版本信息。
+	version   string
+	commit    string
+	buildTime string
+	createdAt time.Time
 	modelRegistry    *modelspkg.Registry
 	providerRegistry *registrypkg.Registry
-
 	httpAccessManager *access.Manager
 	wsAccessManager   *access.Manager
-
 	relay    *wsrelay.Manager
 	pipeline *pipeline.Pipeline
 	httpAPI  *httpserver.Server
-
 	stateMu  sync.Mutex
 	started  bool
 	shutdown bool
@@ -214,6 +219,10 @@ func NewService(opts Options) (*Service, error) {
 	s := &Service{
 		cfg:               cfg,
 		logger:            logger,
+		version:           strings.TrimSpace(opts.Version),
+		commit:            strings.TrimSpace(opts.Commit),
+		buildTime:         strings.TrimSpace(opts.BuildTime),
+		createdAt:         time.Now(),
 		modelRegistry:     modelRegistry,
 		providerRegistry:  providerRegistry,
 		httpAccessManager: httpAccessManager,
@@ -454,6 +463,197 @@ func (s *Service) GetModel(model string) (*core.ModelInfo, bool) {
 	}
 	return s.modelRegistry.Get(model)
 }
+// Status 返回面向生产运维的服务状态总览。
+// 包含：服务信息、路由策略、Provider 列表与诊断、最近事件。
+// 该方法仅用于 GET / 状态接口，不影响热路径性能。
+func (s *Service) Status(ctx context.Context) (map[string]any, error) {
+	_ = ctx
+	if s == nil {
+		return nil, fmt.Errorf("service is nil")
+	}
+
+	now := time.Now()
+
+	// ---- 服务信息 ----
+	serviceInfo := map[string]any{
+		"name":           "aistudio-gemini-gateway",
+		"version":        firstNonEmpty(s.version, "dev"),
+		"commit":         firstNonEmpty(s.commit, "unknown"),
+		"build_time":     firstNonEmpty(s.buildTime, "unknown"),
+		"time":           now.UTC().Format(time.RFC3339Nano),
+		"uptime_seconds": int64(now.Sub(s.createdAt).Seconds()),
+	}
+
+	// ---- 路由策略 ----
+	routingInfo := map[string]any{
+		"strategy":          s.cfg.Routing.Strategy,
+		"provider_cooldown": s.cfg.Routing.ProviderCooldown,
+		"bootstrap_retries": s.cfg.Routing.BootstrapRetries,
+	}
+
+	// ---- Provider 列表与诊断 ----
+	providers := s.providerRegistry.List()
+	allDiag := s.providerRegistry.AllDiagnostics()
+
+	pendingCounts := map[string]int{}
+	if s.relay != nil {
+		pendingCounts = s.relay.ProviderPendingCounts()
+	}
+
+	// 汇总统计。
+	var (
+		countConnected    int
+		countActive       int
+		countCooling      int
+		countDisabled     int
+		countSelectable   int
+		countTotalPending int
+	)
+
+	items := make([]map[string]any, 0, len(providers))
+
+	for _, p := range providers {
+		if p == nil {
+			continue
+		}
+		countConnected++
+
+		isSelectable := false
+		switch p.State {
+		case core.ProviderStateActive, "":
+			countActive++
+			isSelectable = true
+		case core.ProviderStateCooling:
+			countCooling++
+			// 冷却已过期但尚未被 timer 恢复时，仍视为可选。
+			if !p.CooldownUntil.IsZero() && !p.CooldownUntil.After(now) {
+				isSelectable = true
+			}
+		case core.ProviderStateDisabled:
+			countDisabled++
+		}
+		if isSelectable {
+			countSelectable++
+		}
+
+		key := strings.ToLower(strings.TrimSpace(p.ID))
+		pending := pendingCounts[key]
+		countTotalPending += pending
+
+		// 计算 last_seen 和 cooldown 的相对时间。
+		lastSeenAge := int64(0)
+		if !p.LastSeenAt.IsZero() {
+			lastSeenAge = int64(now.Sub(p.LastSeenAt).Seconds())
+			if lastSeenAge < 0 {
+				lastSeenAge = 0
+			}
+		}
+
+		cooldownRemaining := int64(0)
+		if !p.CooldownUntil.IsZero() && p.CooldownUntil.After(now) {
+			cooldownRemaining = int64(p.CooldownUntil.Sub(now).Seconds())
+		}
+
+		item := map[string]any{
+			"id":                         p.ID,
+			"label":                      p.Label,
+			"connection_id":              p.ConnectionID,
+			"state":                      string(p.State),
+			"selectable":                 isSelectable,
+			"priority":                   p.Priority,
+			"connected_at":               statusFormatTime(p.ConnectedAt),
+			"last_seen_at":               statusFormatTime(p.LastSeenAt),
+			"last_seen_age_seconds":      lastSeenAge,
+			"cooldown_until":             statusFormatTime(p.CooldownUntil),
+			"cooldown_remaining_seconds": cooldownRemaining,
+			"pending_requests":           pending,
+			"tags":                       statusStringSlice(p.Tags),
+			"capabilities":              statusCapabilities(p.Capabilities),
+		}
+
+		// 叠加诊断信息。
+		if diag := allDiag[key]; diag != nil {
+			item["last_error"] = diag.LastError
+			item["last_error_at"] = statusFormatTime(diag.LastErrorAt)
+			item["last_disconnect_reason"] = diag.LastDisconnectReason
+			item["last_disconnect_at"] = statusFormatTime(diag.LastDisconnectAt)
+			item["last_state_change"] = diag.LastStateChange
+			item["last_state_reason"] = diag.LastStateReason
+			item["last_state_at"] = statusFormatTime(diag.LastStateAt)
+		} else {
+			item["last_error"] = ""
+			item["last_error_at"] = ""
+			item["last_disconnect_reason"] = ""
+			item["last_disconnect_at"] = ""
+			item["last_state_change"] = ""
+			item["last_state_reason"] = ""
+			item["last_state_at"] = ""
+		}
+
+		items = append(items, item)
+	}
+
+	// ---- 最近事件 ----
+	recentEvents := s.providerRegistry.RecentEvents(32)
+	eventItems := make([]map[string]any, 0, len(recentEvents))
+	for _, ev := range recentEvents {
+		evItem := map[string]any{
+			"type":    string(ev.Type),
+			"at":      statusFormatTime(ev.At),
+			"message": ev.Message,
+		}
+		if ev.Provider != nil {
+			evItem["provider_id"] = ev.Provider.ID
+			evItem["provider_state"] = string(ev.Provider.State)
+		}
+		if len(ev.Metadata) > 0 {
+			evItem["metadata"] = ev.Metadata
+		}
+		eventItems = append(eventItems, evItem)
+	}
+
+	return map[string]any{
+		"service": serviceInfo,
+		"routing": routingInfo,
+		"providers": map[string]any{
+			"summary": map[string]any{
+				"connected":              countConnected,
+				"active":                countActive,
+				"cooling":               countCooling,
+				"disabled":              countDisabled,
+				"selectable":            countSelectable,
+				"pending_requests_total": countTotalPending,
+			},
+			"items":         items,
+			"recent_events": eventItems,
+		},
+	}, nil
+}
+
+func statusFormatTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+func statusStringSlice(in []string) []string {
+	if len(in) == 0 {
+		return []string{}
+	}
+	return in
+}
+
+func statusCapabilities(in []core.ProviderCapability) []string {
+	if len(in) == 0 {
+		return []string{}
+	}
+	out := make([]string, len(in))
+	for i, c := range in {
+		out[i] = string(c)
+	}
+	return out
+}
 
 // =========================
 // HTTP Backend Adapter
@@ -532,6 +732,14 @@ func (a *httpBackendAdapter) CountTokens(ctx context.Context, req *httpgemini.Re
 		return nil, err
 	}
 	return convertToHTTPGeminiResponse(resp), nil
+}
+
+// Status 使 httpBackendAdapter 满足 httpserver.StatusSource 接口。
+func (a *httpBackendAdapter) Status(ctx context.Context) (map[string]any, error) {
+	if a == nil || a.svc == nil {
+		return nil, core.NewInternalError("service backend not initialized", nil)
+	}
+	return a.svc.Status(ctx)
 }
 
 // =========================

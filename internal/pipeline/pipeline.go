@@ -675,7 +675,15 @@ func (p *Pipeline) buildStreamResult(
 	firstEvent wsrelay.StreamEvent,
 	events <-chan wsrelay.StreamEvent,
 ) *service.StreamResult {
-	_ = ctx
+	// 边界保护：
+	// 正常路径下 requestCtx / provider 都不应为 nil。
+	// 这里做兜底，避免极端情况下后续错误处理或日志路径发生空指针。
+	if requestCtx == nil {
+		requestCtx = &RequestContext{}
+	}
+	if provider == nil {
+		provider = &service.RuntimeProvider{}
+	}
 
 	statusCode := firstEvent.Status
 	if statusCode <= 0 {
@@ -686,7 +694,7 @@ func (p *Pipeline) buildStreamResult(
 	// 首包 Header 在当前请求生命周期内只读，直接引用，避免复制。
 	headers := firstEvent.Headers
 
-	useSSE := requestCtx == nil || strings.TrimSpace(requestCtx.Alt) == "" || strings.EqualFold(strings.TrimSpace(requestCtx.Alt), "sse")
+	useSSE := strings.TrimSpace(requestCtx.Alt) == "" || strings.EqualFold(strings.TrimSpace(requestCtx.Alt), "sse")
 	adapter := newGeminiStreamAdapter(useSSE)
 
 	out := make(chan service.StreamChunk, 16)
@@ -704,11 +712,39 @@ func (p *Pipeline) buildStreamResult(
 			}
 		}
 
-		forwardAdapted := func(items []adaptedStreamChunk) bool {
+		logLogicalTerminal := func(reason string, source string) {
+			if strings.TrimSpace(reason) == "" {
+				reason = "UNKNOWN"
+			}
+			p.logger.InfoContext(ctx, "pipeline stream reached logical terminal payload",
+				"request_id", requestCtx.RequestID,
+				"provider_id", provider.ID,
+				"model", requestCtx.ResolvedModel,
+				"action", requestCtx.Action.String(),
+				"attempt", requestCtx.Attempt,
+				"source", source,
+				"finish_reason", reason,
+			)
+		}
+
+		// forwardAdapted 负责把 adapter 已完成协议适配的 payload 下发给客户端。
+		//
+		// 关键增强：
+		// 每发送一个 payload 后，立即检查该 payload 是否已经包含 Gemini 协议层的结束信号：
+		// 1. candidates[0].finishReason
+		// 2. response.candidates[0].finishReason
+		// 3. promptFeedback.blockReason
+		// 4. response.promptFeedback.blockReason
+		//
+		// 一旦命中，说明这轮请求在 Gemini 语义上已经完成，
+		// 即便 Provider 没有显式发送 stream_end，也应该主动结束流，
+		// 避免多轮工具调用中的前一轮连接一直占着不释放。
+		forwardAdapted := func(items []adaptedStreamChunk, source string) (ok bool, terminal bool, terminalReason string) {
 			for _, item := range items {
 				if len(item.DownstreamPayload) == 0 {
 					continue
 				}
+
 				if !sendChunk(service.StreamChunk{
 					// 性能优化：
 					// stream adapter 已为当前 chunk 产出独立 payload，这里不再二次 clone。
@@ -717,23 +753,33 @@ func (p *Pipeline) buildStreamResult(
 						"provider_id": provider.ID,
 					},
 				}) {
-					return false
+					return false, false, ""
+				}
+
+				// 逻辑终止检测：
+				// 只要当前已发送给客户端的 payload 自身已是终态，就直接收尾。
+				if done, reason := detectGeminiTerminalPayload(item.DownstreamPayload); done {
+					logLogicalTerminal(reason, source)
+					return true, true, reason
 				}
 			}
-			return true
+			return true, false, ""
 		}
 
-		forwardPayload := func(raw []byte) bool {
-			return forwardAdapted(adapter.Adapt(raw))
+		forwardPayload := func(raw []byte, source string) (ok bool, terminal bool, terminalReason string) {
+			return forwardAdapted(adapter.Adapt(raw), source)
 		}
 
-		flushPayload := func() bool {
-			return forwardAdapted(adapter.Flush())
+		flushPayload := func(source string) (ok bool, terminal bool, terminalReason string) {
+			return forwardAdapted(adapter.Flush(), source)
 		}
 
 		process := func(event wsrelay.StreamEvent) bool {
 			if event.Err != nil {
-				_ = flushPayload()
+				// 发生 transport 错误时，先尽量冲刷 adapter 缓冲中的尾部数据，
+				// 然后将错误下发给客户端。
+				_, _, _ = flushPayload("event_err_flush")
+
 				_ = sendChunk(service.StreamChunk{
 					Err: p.classifyTransportError(event.Err, requestCtx, provider),
 					Metadata: map[string]any{
@@ -752,23 +798,42 @@ func (p *Pipeline) buildStreamResult(
 				if len(event.Payload) == 0 {
 					return true
 				}
-				return forwardPayload(event.Payload)
+
+				ok, terminal, _ := forwardPayload(event.Payload, "stream_chunk")
+				if !ok {
+					return false
+				}
+				if terminal {
+					// 当前 chunk 已经是 Gemini 逻辑终态，不再继续等待 stream_end。
+					return false
+				}
+				return true
 
 			case wsrelay.MessageTypeHTTPResp:
+				// 某些 Provider 可能不会走 stream_end，而是直接补一个整体 http_response。
 				if len(event.Payload) > 0 {
-					if !forwardPayload(event.Payload) {
+					ok, terminal, _ := forwardPayload(event.Payload, "http_response")
+					if !ok {
+						return false
+					}
+					if terminal {
 						return false
 					}
 				}
-				_ = flushPayload()
+
+				// 即使没有显式逻辑终止，也将 adapter 剩余缓冲冲刷后结束。
+				_, _, _ = flushPayload("http_response_flush")
 				return false
 
 			case wsrelay.MessageTypeStreamEnd:
-				_ = flushPayload()
+				// 正常 transport 结束：冲刷缓存后退出。
+				_, _, _ = flushPayload("stream_end_flush")
 				return false
 
 			case wsrelay.MessageTypeError:
-				_ = flushPayload()
+				// 显式 error 包：冲刷缓存后下发上游协议错误。
+				_, _, _ = flushPayload("message_error_flush")
+
 				_ = sendChunk(service.StreamChunk{
 					Err: service.NewUpstreamProtocolError(
 						"upstream stream error",
@@ -787,19 +852,23 @@ func (p *Pipeline) buildStreamResult(
 			return true
 		}
 
+		// 先处理 bootstrap 后的首个事件。
 		if !process(firstEvent) {
 			return
 		}
 
+		// 再持续消费后续事件。
 		for {
 			select {
 			case <-attemptCtx.Done():
-				_ = flushPayload()
+				// 调用方取消或上层主动结束时，尽量冲刷残留缓冲。
+				_, _, _ = flushPayload("attempt_ctx_done_flush")
 				return
 
 			case event, ok := <-events:
 				if !ok {
-					_ = flushPayload()
+					// Provider 事件流关闭：冲刷残留缓冲后结束。
+					_, _, _ = flushPayload("events_closed_flush")
 					return
 				}
 				if !process(event) {
@@ -1076,7 +1145,19 @@ func (p *Pipeline) applyProviderCooldown(provider *service.RuntimeProvider, err 
 		return
 	}
 
+	// 不论是否需要冷却，都记录本次错误到诊断存储。
+	// 这样状态总览接口可以展示每个 Provider 最近一次错误的详情。
+	errMessage := err.Error()
 	var gatewayErr *service.GatewayError
+	if errors.As(err, &gatewayErr) && gatewayErr != nil {
+		// 优先使用 publicMessage，它通常包含上游原始错误信息。
+		if pub := strings.TrimSpace(gatewayErr.Public); pub != "" {
+			errMessage = pub
+		}
+	}
+	p.registry.RecordProviderError(provider.ID, errMessage)
+
+	// 仅当错误标记了 Cooldown 时，才触发 Provider 冷却。
 	if !errors.As(err, &gatewayErr) || gatewayErr == nil || !gatewayErr.Cooldown {
 		return
 	}
@@ -1090,7 +1171,7 @@ func (p *Pipeline) applyProviderCooldown(provider *service.RuntimeProvider, err 
 	}
 
 	until := time.Now().Add(cooldown)
-	_, _ = p.registry.SetCooldown(provider.ID, until, "provider cooled down by pipeline")
+	_, _ = p.registry.SetCooldown(provider.ID, until, "provider cooled down: "+errMessage)
 }
 
 // maxAttempts 返回本次请求最大尝试次数。
@@ -1226,6 +1307,59 @@ func extractErrorMessage(body []byte) string {
 		text = text[:512]
 	}
 	return text
+}
+// detectGeminiTerminalPayload 检测一个 Gemini JSON payload 是否已经表示“逻辑结束”。
+//
+// transport 层的 stream_end 并不总是可靠出现。
+// 某些 Provider / 浏览器扩展 / relay 只会持续吐出 JSON chunk，
+// 其中最后一个 chunk 已经包含 finishReason，
+// 但连接本身还保持着，导致网关一直傻等 stream_end，最终出现“卡住不结束”。
+//
+// 判定规则：
+// 1. candidates[0].finishReason 非空
+// 2. response.candidates[0].finishReason 非空（兼容某些包裹格式）
+// 3. candidates[0].finish_reason 非空（兼容 snake_case）
+// 4. response.candidates[0].finish_reason 非空
+// 5. promptFeedback.blockReason 非空
+// 6. response.promptFeedback.blockReason 非空
+// 7. prompt_feedback.block_reason 非空
+// 8. response.prompt_feedback.block_reason 非空
+//
+// 返回值：
+// - done：是否已检测到 Gemini 协议层逻辑结束
+// - reason：结束原因，便于日志定位，如 STOP / MAX_TOKENS / SAFETY / BLOCKLIST
+func detectGeminiTerminalPayload(payload []byte) (done bool, reason string) {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return false, ""
+	}
+
+	// 1. 标准 candidate finishReason 路径
+	for _, path := range []string{
+		"candidates.0.finishReason",
+		"response.candidates.0.finishReason",
+		"candidates.0.finish_reason",
+		"response.candidates.0.finish_reason",
+	} {
+		value := strings.TrimSpace(gjson.GetBytes(payload, path).String())
+		if value != "" {
+			return true, value
+		}
+	}
+
+	// 2. prompt 被阻断时，也视为请求已完整结束
+	for _, path := range []string{
+		"promptFeedback.blockReason",
+		"response.promptFeedback.blockReason",
+		"prompt_feedback.block_reason",
+		"response.prompt_feedback.block_reason",
+	} {
+		value := strings.TrimSpace(gjson.GetBytes(payload, path).String())
+		if value != "" {
+			return true, value
+		}
+	}
+
+	return false, ""
 }
 
 // containsTemporaryHint 判断错误消息中是否包含临时性错误提示关键词。

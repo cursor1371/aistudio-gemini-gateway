@@ -63,7 +63,10 @@ func main() {
 
 	// 创建服务。
 	svc, err := gateway.NewService(gateway.Options{
-		Config: cfg,
+		Config:    cfg,
+		Version:   version,
+		Commit:    commit,
+		BuildTime: buildTime,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "创建服务失败: %v\n", err)

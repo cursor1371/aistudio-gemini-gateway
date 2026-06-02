@@ -32,17 +32,100 @@ type Options struct {
 	Now    func() time.Time
 }
 
+const maxRecentEvents = 64
+
+// ProviderDiagnostics 是每个 Provider 的运行时诊断信息。
+// 该信息不影响选路逻辑，仅用于状态总览接口的展示。
+type ProviderDiagnostics struct {
+	LastError            string
+	LastErrorAt          time.Time
+	LastDisconnectReason string
+	LastDisconnectAt     time.Time
+	LastStateChange      string // 例如 "active -> cooling"
+	LastStateReason      string
+	LastStateAt          time.Time
+}
+
+// eventRingBuffer 是固定容量的 Provider 事件环形缓冲区。
+// 用于在状态总览接口中展示最近发生的 Provider 生命周期事件。
+type eventRingBuffer struct {
+	mu     sync.Mutex
+	events []service.ProviderEvent
+}
+
+func newEventRingBuffer() *eventRingBuffer {
+	return &eventRingBuffer{
+		events: make([]service.ProviderEvent, 0, maxRecentEvents),
+	}
+}
+
+// Add 记录一条事件。超过容量时自动淘汰最旧事件。
+func (b *eventRingBuffer) Add(event service.ProviderEvent) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	// 浅拷贝事件，深拷贝 Provider 和 Metadata 避免后续被外部修改。
+	stored := event
+	if event.Provider != nil {
+		stored.Provider = event.Provider.Clone()
+	}
+	if len(event.Metadata) > 0 {
+		meta := make(map[string]any, len(event.Metadata))
+		for k, v := range event.Metadata {
+			meta[k] = v
+		}
+		stored.Metadata = meta
+	}
+
+	b.events = append(b.events, stored)
+	if len(b.events) > maxRecentEvents {
+		copy(b.events, b.events[len(b.events)-maxRecentEvents:])
+		b.events = b.events[:maxRecentEvents]
+	}
+}
+
+// Recent 返回最近 n 条事件（最新在前）。
+func (b *eventRingBuffer) Recent(n int) []service.ProviderEvent {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	total := len(b.events)
+	if n <= 0 || n > total {
+		n = total
+	}
+
+	out := make([]service.ProviderEvent, n)
+	for i := 0; i < n; i++ {
+		src := b.events[total-1-i]
+		out[i] = src
+		if src.Provider != nil {
+			out[i].Provider = src.Provider.Clone()
+		}
+		if len(src.Metadata) > 0 {
+			meta := make(map[string]any, len(src.Metadata))
+			for k, v := range src.Metadata {
+				meta[k] = v
+			}
+			out[i].Metadata = meta
+		}
+	}
+	return out
+}
+
 // Registry 管理运行时在线 Provider。
 // 核心规则：
-// 1. Provider 不声明模型支持范围，模型真值源来自静态模型注册表
-// 2. 冷却恢复由定时器驱动，读路径不做隐式写恢复
+//  1. Provider 不声明模型支持范围，模型真值源来自静态模型注册表
+//  2. 冷却恢复由定时器驱动，读路径不做隐式写恢复
 type Registry struct {
 	mu             sync.RWMutex
 	providers      map[string]*service.RuntimeProvider
 	cooldownTimers map[string]*time.Timer
+	diagnostics    map[string]*ProviderDiagnostics
 
 	subscribers map[uint64]chan service.ProviderEvent
 	nextSubID   uint64
+
+	recentEvents *eventRingBuffer
 
 	logger Logger
 	now    func() time.Time
@@ -62,7 +145,9 @@ func New(opts Options) *Registry {
 	return &Registry{
 		providers:      make(map[string]*service.RuntimeProvider),
 		cooldownTimers: make(map[string]*time.Timer),
+		diagnostics:    make(map[string]*ProviderDiagnostics),
 		subscribers:    make(map[uint64]chan service.ProviderEvent),
+		recentEvents:   newEventRingBuffer(),
 		logger:         logger,
 		now:            nowFn,
 	}
@@ -195,6 +280,15 @@ func (r *Registry) Disconnect(providerID, connectionID string, cause error) (*se
 			removed = current.Clone()
 			delete(r.providers, key)
 			r.stopCooldownTimerLocked(key)
+
+			// 记录断连诊断。
+			diag := r.ensureDiagnosticsLocked(key)
+			if cause != nil {
+				diag.LastDisconnectReason = cause.Error()
+			} else {
+				diag.LastDisconnectReason = "unknown"
+			}
+			diag.LastDisconnectAt = now
 		}
 	}
 	r.mu.Unlock()
@@ -305,6 +399,12 @@ func (r *Registry) SetState(providerID string, state service.ProviderState, mess
 			},
 		}
 	}
+
+	// 记录状态变更诊断。
+	diag := r.ensureDiagnosticsLocked(key)
+	diag.LastStateChange = string(oldState) + " -> " + string(current.State)
+	diag.LastStateReason = firstNonEmpty(message, "state changed")
+	diag.LastStateAt = now
 	r.mu.Unlock()
 
 	if event != nil {
@@ -368,6 +468,12 @@ func (r *Registry) SetCooldown(providerID string, until time.Time, message strin
 			},
 		}
 	}
+
+	// 记录状态变更诊断。
+	diag := r.ensureDiagnosticsLocked(key)
+	diag.LastStateChange = string(oldState) + " -> " + string(current.State)
+	diag.LastStateReason = firstNonEmpty(message, "cooldown updated")
+	diag.LastStateAt = now
 	r.mu.Unlock()
 
 	if event != nil {
@@ -468,6 +574,54 @@ func (r *Registry) Subscribe(buffer int) (<-chan service.ProviderEvent, func()) 
 	return ch, cancel
 }
 
+// RecordProviderError 记录 Provider 最近一次错误，仅用于状态总览展示。
+func (r *Registry) RecordProviderError(providerID string, message string) {
+	if r == nil {
+		return
+	}
+	key := providerMapKey(providerID)
+	now := r.now()
+
+	r.mu.Lock()
+	diag := r.ensureDiagnosticsLocked(key)
+	diag.LastError = message
+	diag.LastErrorAt = now
+	r.mu.Unlock()
+}
+
+// AllDiagnostics 返回所有 Provider 的诊断信息副本。
+func (r *Registry) AllDiagnostics() map[string]*ProviderDiagnostics {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	out := make(map[string]*ProviderDiagnostics, len(r.diagnostics))
+	for k, v := range r.diagnostics {
+		cloned := *v
+		out[k] = &cloned
+	}
+	return out
+}
+
+// RecentEvents 返回最近 limit 条 Provider 生命周期事件（最新在前）。
+func (r *Registry) RecentEvents(limit int) []service.ProviderEvent {
+	if r == nil || r.recentEvents == nil {
+		return nil
+	}
+	return r.recentEvents.Recent(limit)
+}
+
+func (r *Registry) ensureDiagnosticsLocked(key string) *ProviderDiagnostics {
+	if diag, ok := r.diagnostics[key]; ok {
+		return diag
+	}
+	diag := &ProviderDiagnostics{}
+	r.diagnostics[key] = diag
+	return diag
+}
+
 // publish 通知所有事件订阅者。
 // 持有 RLock 期间完成非阻塞发送；由于 cancel() 需要 WLock，
 // 在 RLock 持有期间 cancel() 无法执行 close(ch)，避免 send on closed channel。
@@ -476,7 +630,10 @@ func (r *Registry) publish(ctx context.Context, event service.ProviderEvent) {
 		return
 	}
 	ctx = ensureContext(ctx)
-
+	// 记录到最近事件缓冲区，供状态总览接口展示。
+	if r.recentEvents != nil {
+		r.recentEvents.Add(event)
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
