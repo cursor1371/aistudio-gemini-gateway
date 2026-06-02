@@ -218,7 +218,8 @@ type ModelThinkingConfig struct {
 type ModelAlias struct {
 	// Alias 对外别名。
 	Alias string `yaml:"alias" json:"alias"`
-	// Target string `yaml:"target" json:"target"`
+	// Target 目标物理模型名。
+	Target string `yaml:"target" json:"target"`
 	// Expose 是否在 /v1beta/models 列表中显示该别名。
 	Expose bool `yaml:"expose,omitempty" json:"expose,omitempty"`
 }
