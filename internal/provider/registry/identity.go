@@ -15,6 +15,16 @@ import (
 
 var providerIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
 
+// 内置 Cookie 名兜底列表。
+// 设计原则：
+// 1. 不扩展配置 schema，避免扩大改动面
+// 2. 只对 ID / Label 增加 Cookie 读取能力
+// 3. 保持 Header / Query 优先，Cookie 仅作兜底
+var (
+	defaultProviderIDCookieNames    = []string{"provider_id", "providerId"}
+	defaultProviderLabelCookieNames = []string{"provider_label", "providerLabel"}
+)
+
 // ValidateProviderID 校验 Provider ID 合法性。
 func ValidateProviderID(id string) error {
 	id = strings.TrimSpace(id)
@@ -28,7 +38,14 @@ func ValidateProviderID(id string) error {
 }
 
 // IdentityExtractor 用于从 WS 握手请求中提取 Provider 身份。
-// Provider 不再声明模型支持范围，因此这里不解析任何模型能力字段。
+// Provider 不再声明 supported models，
+// 因此这里不再解析任何“模型支持能力”字段。
+//
+// 当前增强点：
+// 在保持旧的 Header / Query 提取逻辑不变的基础上，
+// 增加 Cookie 兜底提取能力，用于支持跨站 Cookie 注入方案：
+//   - provider_id
+//   - provider_label
 type IdentityExtractor struct {
 	cfg config.ProviderIdentityConfig
 }
@@ -51,7 +68,10 @@ func NewIdentityExtractor(cfg config.ProviderIdentityConfig) *IdentityExtractor 
 }
 
 // Extract 从 HTTP 握手请求中提取 RuntimeProvider 的静态部分。
-// ConnectionID 由 wsrelay.Manager 在连接建立时赋值，这里不负责。
+// 注意：
+// 1. 这里不负责设置 ConnectionID，ConnectionID 由 wsrelay.Manager 在连接建立时赋值。
+// 2. 这里不再处理 supported models；模型真值源已收敛到静态模型注册表。
+// 3. 读取优先级：Header -> Query -> Cookie -> 默认回退
 func (e *IdentityExtractor) Extract(r *http.Request, authResult *access.Result) (*service.RuntimeProvider, error) {
 	if r == nil {
 		return nil, fmt.Errorf("request is nil")
@@ -60,8 +80,28 @@ func (e *IdentityExtractor) Extract(r *http.Request, authResult *access.Result) 
 		e = NewIdentityExtractor(config.ProviderIdentityConfig{})
 	}
 
-	id := firstValue(r, e.cfg.IDHeaderNames, e.cfg.IDQueryNames)
-	label := firstValue(r, e.cfg.LabelHeaderNames, e.cfg.LabelQueryNames)
+	// Provider ID 提取顺序：
+	// 1. Header
+	// 2. Query
+	// 3. Cookie(provider_id / providerId)
+	id := firstIdentityValue(
+		r,
+		e.cfg.IDHeaderNames,
+		e.cfg.IDQueryNames,
+		defaultProviderIDCookieNames,
+	)
+
+	// Provider Label 提取顺序：
+	// 1. Header
+	// 2. Query
+	// 3. Cookie(provider_label / providerLabel)
+	label := firstIdentityValue(
+		r,
+		e.cfg.LabelHeaderNames,
+		e.cfg.LabelQueryNames,
+		defaultProviderLabelCookieNames,
+	)
+
 	tags := collectCSVValues(r, e.cfg.TagsHeaderNames, e.cfg.TagsQueryNames)
 
 	priority := 0
@@ -74,6 +114,8 @@ func (e *IdentityExtractor) Extract(r *http.Request, authResult *access.Result) 
 		priority = parsed
 	}
 
+	// 仅当请求显式提供了 ID 时才校验。
+	// 若 ID 为空，则保持现有行为，由 wsrelay.Manager 后续自动生成默认 Provider ID。
 	if id != "" {
 		if err := ValidateProviderID(id); err != nil {
 			return nil, err
@@ -82,6 +124,9 @@ func (e *IdentityExtractor) Extract(r *http.Request, authResult *access.Result) 
 	if len(label) > 256 {
 		return nil, fmt.Errorf("provider label too long")
 	}
+
+	// Label 若未提供，则回退为 ID。
+	// 若 ID 此时也为空，则后续 wsrelay.Manager 会自动生成 ID，并在没有 Label 时用其作默认 Label。
 	if label == "" {
 		label = id
 	}
@@ -115,6 +160,23 @@ func (e *IdentityExtractor) Extract(r *http.Request, authResult *access.Result) 
 	return provider, nil
 }
 
+// firstIdentityValue 按“Header -> Query -> Cookie”的顺序提取单值身份字段。
+// 该函数用于 Provider ID / Label 的统一读取逻辑。
+func firstIdentityValue(r *http.Request, headerNames, queryNames, cookieNames []string) string {
+	if r == nil {
+		return ""
+	}
+
+	// 先走旧策略：Header / Query
+	if value := firstValue(r, headerNames, queryNames); value != "" {
+		return value
+	}
+
+	// 再走 Cookie 兜底策略。
+	return firstCookieValue(r, cookieNames)
+}
+
+// firstValue 按 Header -> Query 顺序提取单值字段。
 func firstValue(r *http.Request, headerNames, queryNames []string) string {
 	if r == nil {
 		return ""
@@ -143,6 +205,35 @@ func firstValue(r *http.Request, headerNames, queryNames []string) string {
 	return ""
 }
 
+// firstCookieValue 按 Cookie 名顺序提取首个非空 Cookie 值。
+// 仅用于 WS 握手阶段的身份标记兜底。
+// 由于握手仅发生在连接建立时，性能开销可以忽略。
+func firstCookieValue(r *http.Request, cookieNames []string) string {
+	if r == nil || len(cookieNames) == 0 {
+		return ""
+	}
+
+	for _, name := range cookieNames {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+
+		cookie, err := r.Cookie(name)
+		if err != nil || cookie == nil {
+			continue
+		}
+
+		value := strings.TrimSpace(cookie.Value)
+		if value != "" {
+			return value
+		}
+	}
+
+	return ""
+}
+
+// collectCSVValues 从 Header / Query 中提取 CSV 风格的多值字段（如 tags）。
 func collectCSVValues(r *http.Request, headerNames, queryNames []string) []string {
 	var out []string
 	if r == nil {
@@ -167,6 +258,7 @@ func collectCSVValues(r *http.Request, headerNames, queryNames []string) []strin
 	return common.UniqueNonEmptyStrings(out, true)
 }
 
+// splitCSV 按逗号拆分字符串列表，并去掉空白。
 func splitCSV(value string) []string {
 	value = strings.TrimSpace(value)
 	if value == "" {
