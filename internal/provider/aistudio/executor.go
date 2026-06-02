@@ -38,6 +38,10 @@ type Options struct {
 	BaseURL    string
 	Logger     Logger
 	Now        func() time.Time
+
+	// BootstrapTimeout 用于非流式请求的“启动首包超时”。
+	// 若在该时限内未收到第一个有效上游响应包，则判定 Provider 启动失败。
+	BootstrapTimeout time.Duration
 }
 
 // Executor 是 AI Studio Provider 的实际执行器。
@@ -46,11 +50,12 @@ type Options struct {
 // 2. 发给指定 Provider
 // 3. 返回上游原始响应
 type Executor struct {
-	relay      *wsrelay.Manager
-	apiVersion string
-	baseURL    string
-	logger     Logger
-	now        func() time.Time
+	relay            *wsrelay.Manager
+	apiVersion       string
+	baseURL          string
+	logger           Logger
+	now              func() time.Time
+	bootstrapTimeout time.Duration
 }
 
 // New 创建执行器。
@@ -80,11 +85,12 @@ func New(opts Options) (*Executor, error) {
 	}
 
 	return &Executor{
-		relay:      opts.Relay,
-		apiVersion: apiVersion,
-		baseURL:    strings.TrimRight(baseURL, "/"),
-		logger:     logger,
-		now:        nowFn,
+		relay:            opts.Relay,
+		apiVersion:       apiVersion,
+		baseURL:          strings.TrimRight(baseURL, "/"),
+		logger:           logger,
+		now:              nowFn,
+		bootstrapTimeout: opts.BootstrapTimeout,
 	}, nil
 }
 
@@ -142,7 +148,7 @@ func (e *Executor) doNonStream(ctx context.Context, provider *service.RuntimePro
 		return nil, err
 	}
 
-	resp, err := e.relay.NonStream(ctx, provider.ID, wsReq)
+	resp, err := e.relay.NonStreamWithBootstrap(ctx, provider.ID, wsReq, e.bootstrapTimeout)
 	if err != nil {
 		return nil, err
 	}

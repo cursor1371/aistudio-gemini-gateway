@@ -30,7 +30,19 @@ func (e *RelayError) Error() string {
 
 // NonStream 通过指定 Provider 执行一次非流式 HTTP 风格请求。
 // 即便 Provider 返回的是 stream_start/chunk/end 序列，本方法也会自动拼接成最终 body。
+// 默认不启动首包超时控制；若需首包超时保护，内部实际调用 NonStreamWithBootstrap。
 func (m *Manager) NonStream(ctx context.Context, providerID string, req *HTTPRequest) (*HTTPResponse, error) {
+	return m.NonStreamWithBootstrap(ctx, providerID, req, 0)
+}
+
+// NonStreamWithBootstrap 通过指定 Provider 执行一次非流式 HTTP 风格请求，
+// 并在“收到第一个有效上游响应包”前应用 bootstrapTimeout。
+//
+// 超时语义：
+// 1. 仅在首个有效响应包到达前生效
+// 2. 一旦收到任意首包（HTTPResp / StreamStart / StreamChunk / Error），bootstrap 计时即停止
+// 3. 后续等待最终完整响应，继续受外层 ctx 控制
+func (m *Manager) NonStreamWithBootstrap(ctx context.Context, providerID string, req *HTTPRequest, bootstrapTimeout time.Duration) (*HTTPResponse, error) {
 	if m == nil {
 		return nil, fmt.Errorf("wsrelay manager is nil")
 	}
@@ -50,20 +62,66 @@ func (m *Manager) NonStream(ctx context.Context, providerID string, req *HTTPReq
 	}
 
 	var (
-		streamMode bool
-		streamResp *HTTPResponse
-		bodyBuf    bytes.Buffer
+		streamMode     bool
+		streamResp     *HTTPResponse
+		bodyBuf        bytes.Buffer
+		
+		firstPacket    bool
+		bootstrapC     <-chan time.Time
+		bootstrapTimer *time.Timer
 	)
+
+	// 若配置了首包超时时间，则启动独立的 bootstrap timer。
+	if bootstrapTimeout > 0 {
+		bootstrapTimer = time.NewTimer(bootstrapTimeout)
+		bootstrapC = bootstrapTimer.C
+		// 确保退出时清理定时器。
+		defer func() {
+			if bootstrapTimer != nil {
+				if !bootstrapTimer.Stop() {
+					select {
+					case <-bootstrapTimer.C:
+					default:
+					}
+				}
+			}
+		}()
+	}
+
+	// 取消首包超时的工具闭包。
+	stopBootstrapTimer := func() {
+		if bootstrapTimer == nil {
+			return
+		}
+		if !bootstrapTimer.Stop() {
+			select {
+			case <-bootstrapTimer.C:
+			default:
+			}
+		}
+		bootstrapTimer = nil
+		bootstrapC = nil
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 
+		case <-bootstrapC:
+			// 仅在首个有效包收到之前生效。超时后终止请求以触发 Pipeline 的冷切与重试逻辑。
+			return nil, fmt.Errorf("bootstrap timeout waiting for first upstream packet: %w", context.DeadlineExceeded)
+
 		case msg, ok := <-respCh:
 			if !ok {
 				// 通道异常关闭（未收到终止消息），视为错误。
 				return nil, errors.New("wsrelay response channel closed unexpectedly")
+			}
+
+			// 收到任何包都说明链路已通（打通首包）。取消首包限时器。
+			if !firstPacket {
+				firstPacket = true
+				stopBootstrapTimer()
 			}
 
 			switch msg.Type {

@@ -133,6 +133,15 @@ func (c *Config) ApplyDefaults() {
 	if strings.TrimSpace(c.Routing.ProviderCooldown) == "" {
 		c.Routing.ProviderCooldown = DefaultProviderCooldown
 	}
+	if strings.TrimSpace(c.Routing.BootstrapTimeout) == "" {
+		c.Routing.BootstrapTimeout = DefaultBootstrapTimeout
+	}
+	if strings.TrimSpace(c.Routing.StreamIdleTimeout) == "" {
+		c.Routing.StreamIdleTimeout = DefaultStreamIdleTimeout
+	}
+	if strings.TrimSpace(c.Routing.NonStreamTimeout) == "" {
+		c.Routing.NonStreamTimeout = DefaultNonStreamTimeout
+	}
 
 	// models
 	if strings.TrimSpace(c.Models.Source) == "" {
@@ -194,6 +203,9 @@ func (c *Config) Normalize() {
 	c.Routing.Strategy = normalizeEnum(c.Routing.Strategy)
 	c.Routing.SessionAffinityTTL = strings.TrimSpace(c.Routing.SessionAffinityTTL)
 	c.Routing.ProviderCooldown = strings.TrimSpace(c.Routing.ProviderCooldown)
+	c.Routing.BootstrapTimeout = strings.TrimSpace(c.Routing.BootstrapTimeout)
+	c.Routing.StreamIdleTimeout = strings.TrimSpace(c.Routing.StreamIdleTimeout)
+	c.Routing.NonStreamTimeout = strings.TrimSpace(c.Routing.NonStreamTimeout)
 
 	c.Models.Source = normalizeEnum(c.Models.Source)
 	c.Models.Entries = normalizeModelEntries(c.Models.Entries)
@@ -289,6 +301,9 @@ func (c *Config) Validate() error {
 	}
 	validateDuration(v, "routing.session-affinity-ttl", c.Routing.SessionAffinityTTL)
 	validateDuration(v, "routing.provider-cooldown", c.Routing.ProviderCooldown)
+	validateDuration(v, "routing.bootstrap-timeout", c.Routing.BootstrapTimeout)
+	validateDuration(v, "routing.stream-idle-timeout", c.Routing.StreamIdleTimeout)
+	validateDuration(v, "routing.non-stream-timeout", c.Routing.NonStreamTimeout)
 	if c.Routing.BootstrapRetries < 0 {
 		v.add("routing.bootstrap-retries 不能小于 0")
 	}

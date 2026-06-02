@@ -494,6 +494,27 @@ func ApplyEnvOverrides(cfg *Config) (changed bool, applied []string, err error) 
 		return false, nil, err
 	}
 
+	if err := apply("ROUTING_BOOTSTRAP_TIMEOUT", func(raw string) error {
+		cfg.Routing.BootstrapTimeout = raw
+		return nil
+	}); err != nil {
+		return false, nil, err
+	}
+
+	if err := apply("ROUTING_STREAM_IDLE_TIMEOUT", func(raw string) error {
+		cfg.Routing.StreamIdleTimeout = raw
+		return nil
+	}); err != nil {
+		return false, nil, err
+	}
+
+	if err := apply("ROUTING_NON_STREAM_TIMEOUT", func(raw string) error {
+		cfg.Routing.NonStreamTimeout = raw
+		return nil
+	}); err != nil {
+		return false, nil, err
+	}
+
 	// =========================
 	// models
 	// =========================

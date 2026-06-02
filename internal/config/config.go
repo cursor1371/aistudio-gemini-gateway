@@ -89,7 +89,7 @@ type WebSocketConfig struct {
 	Path string `yaml:"path" json:"path"`
 	// HandshakeTimeout 握手超时，默认 10s。
 	HandshakeTimeout string `yaml:"handshake-timeout" json:"handshake-timeout"`
-	// ReadTimeout WS 消息读取超时，默认 60s。
+	// ReadTimeout WS 消息读取超时，默认 300s。
 	ReadTimeout string `yaml:"read-timeout" json:"read-timeout"`
 	// WriteTimeout WS 消息写入超时，默认 10s。
 	WriteTimeout string `yaml:"write-timeout" json:"write-timeout"`
@@ -109,7 +109,7 @@ type WebSocketConfig struct {
 type HeartbeatConfig struct {
 	// PingInterval 服务端主动 Ping 间隔，默认 30s。
 	PingInterval string `yaml:"ping-interval" json:"ping-interval"`
-	// PongTimeout 等待 Pong 的超时时间，默认 60s。
+	// PongTimeout 等待 Pong 的超时时间，默认 120s。
 	PongTimeout string `yaml:"pong-timeout" json:"pong-timeout"`
 }
 
@@ -142,10 +142,22 @@ type RoutingConfig struct {
 	Strategy string `yaml:"strategy" json:"strategy"`
 	// SessionAffinityTTL 会话绑定保留时间，默认 1h。
 	SessionAffinityTTL string `yaml:"session-affinity-ttl" json:"session-affinity-ttl"`
-	// BootstrapRetries 首字节前重试次数，默认 1。
+	// BootstrapRetries 指首字节重试策略参考次数（实际重试次数由可用 Provider 数量决定）。
 	BootstrapRetries int `yaml:"bootstrap-retries" json:"bootstrap-retries"`
 	// ProviderCooldown Provider 冷却时间，默认 5m。
 	ProviderCooldown string `yaml:"provider-cooldown" json:"provider-cooldown"`
+
+	// BootstrapTimeout 启动首包超时，默认 60s。
+	// 从网关开始向 Provider 发送请求，到收到第一个有效 Gemini 数据包的最长等待时间。
+	BootstrapTimeout string `yaml:"bootstrap-timeout" json:"bootstrap-timeout"`
+
+	// StreamIdleTimeout 流式空闲中断超时，默认 90s。
+	// 流式输出正在传输过程中，相邻两个数据块（chunk/event）之间的最长空闲间隔。
+	StreamIdleTimeout string `yaml:"stream-idle-timeout" json:"stream-idle-timeout"`
+
+	// NonStreamTimeout 非流式总体执行超时，默认 600s。
+	// 实用于 generateContent（非流式）和 countTokens 的单次请求整体耗时上限。
+	NonStreamTimeout string `yaml:"non-stream-timeout" json:"non-stream-timeout"`
 }
 
 // ---------------------------------------------------------------------------
@@ -206,8 +218,7 @@ type ModelThinkingConfig struct {
 type ModelAlias struct {
 	// Alias 对外别名。
 	Alias string `yaml:"alias" json:"alias"`
-	// Target 必须指向一个已存在的真实模型名。
-	Target string `yaml:"target" json:"target"`
+	// Target string `yaml:"target" json:"target"`
 	// Expose 是否在 /v1beta/models 列表中显示该别名。
 	Expose bool `yaml:"expose,omitempty" json:"expose,omitempty"`
 }

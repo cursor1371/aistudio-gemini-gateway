@@ -82,6 +82,13 @@ type Pipeline struct {
 	bootstrapRetries int
 	providerCooldown time.Duration
 
+	// BootstrapTimeout：启动首包超时
+	bootstrapTimeout time.Duration
+	// StreamIdleTimeout：流式空闲中断超时
+	streamIdleTimeout time.Duration
+	// NonStreamTimeout：非流式总体执行超时
+	nonStreamTimeout time.Duration
+
 	ownedSelector bool
 
 	closeOnce     sync.Once
@@ -115,6 +122,11 @@ func New(opts Options) (*Pipeline, error) {
 	}
 
 	sessionTTL, _ := config.ParseDurationOrDefault(cfg.Routing.SessionAffinityTTL, time.Hour)
+	providerCooldown, _ := config.ParseDurationOrDefault(cfg.Routing.ProviderCooldown, 5*time.Minute)
+
+	bootstrapTimeout, _ := config.ParseDurationOrDefault(cfg.Routing.BootstrapTimeout, 60*time.Second)
+	streamIdleTimeout, _ := config.ParseDurationOrDefault(cfg.Routing.StreamIdleTimeout, 90*time.Second)
+	nonStreamTimeout, _ := config.ParseDurationOrDefault(cfg.Routing.NonStreamTimeout, 600*time.Second)
 
 	selectorRef := opts.Selector
 	ownedSelector := false
@@ -132,28 +144,30 @@ func New(opts Options) (*Pipeline, error) {
 			return nil, service.NewConfigError("pipeline requires relay or prebuilt executor", nil)
 		}
 		executorRef, err = aistudiopkg.New(aistudiopkg.Options{
-			Relay:      opts.Relay,
-			APIVersion: cfg.Gemini.APIVersion,
-			Logger:     logger,
+			Relay:            opts.Relay,
+			APIVersion:       cfg.Gemini.APIVersion,
+			Logger:           logger,
+			BootstrapTimeout: bootstrapTimeout,
 		})
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	providerCooldown, _ := config.ParseDurationOrDefault(cfg.Routing.ProviderCooldown, 5*time.Minute)
-
 	p := &Pipeline{
-		cfg:              cfg,
-		resolveModel:     opts.ResolveModel,
-		registry:         opts.Registry,
-		selector:         selectorRef,
-		executor:         executorRef,
-		logger:           logger,
-		sessionExtractor: sessionExtractor,
-		bootstrapRetries: maxInt(0, cfg.Routing.BootstrapRetries),
-		providerCooldown: providerCooldown,
-		ownedSelector:    ownedSelector,
+		cfg:               cfg,
+		resolveModel:      opts.ResolveModel,
+		registry:          opts.Registry,
+		selector:          selectorRef,
+		executor:          executorRef,
+		logger:            logger,
+		sessionExtractor:  sessionExtractor,
+		bootstrapRetries:  maxInt(0, cfg.Routing.BootstrapRetries),
+		providerCooldown:  providerCooldown,
+		bootstrapTimeout:  bootstrapTimeout,
+		streamIdleTimeout: streamIdleTimeout,
+		nonStreamTimeout:  nonStreamTimeout,
+		ownedSelector:     ownedSelector,
 	}
 
 	p.attachProviderEventSink()
@@ -180,12 +194,16 @@ func (p *Pipeline) Close() error {
 
 // Execute 处理 Gemini 非流式 generateContent。
 func (p *Pipeline) Execute(ctx context.Context, req *service.GatewayRequest) (*service.GatewayResponse, error) {
-	ctx, requestCtx, err := p.prepareGenerateRequest(ctx, req, service.ActionGenerateContent)
+	// 对非流式请求施加整体执行超时。
+	timeoutCtx, cancel := withOptionalTimeout(ctx, p.nonStreamTimeout)
+	defer cancel()
+
+	timeoutCtx, requestCtx, err := p.prepareGenerateRequest(timeoutCtx, req, service.ActionGenerateContent)
 	if err != nil {
 		return nil, err
 	}
 
-	resp, _, err := p.executeNonStreamWithRetry(ctx, requestCtx)
+	resp, _, err := p.executeNonStreamWithRetry(timeoutCtx, requestCtx)
 	if err != nil {
 		return nil, err
 	}
@@ -249,7 +267,60 @@ func (p *Pipeline) Stream(ctx context.Context, req *service.GatewayRequest) (*se
 			return nil, gwErr
 		}
 
-		firstEvent, ok := <-streamResp.Events
+		var (
+			firstEvent wsrelay.StreamEvent
+			ok         bool
+		)
+
+		// 启动首包超时：在 bootstrapTimeout 内等待上下游打通。
+		if p.bootstrapTimeout > 0 {
+			timer := time.NewTimer(p.bootstrapTimeout)
+			select {
+			case <-ctx.Done():
+				// 客户端主动断开
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				attemptCancel()
+				return nil, ctx.Err()
+
+			case <-timer.C:
+				attemptCancel()
+
+				gwErr := service.NewStreamBootstrapError(
+					"provider bootstrap timeout waiting for first upstream packet",
+					context.DeadlineExceeded,
+					service.WithRetryable(true),
+					service.WithCooldown(true),
+					service.WithModel(requestCtx.ResolvedModel),
+					service.WithAction(requestCtx.Action),
+					service.WithProviderID(provider.ID),
+					service.WithPublicMessage("启动首包超时"),
+				)
+				p.applyProviderCooldown(provider, gwErr)
+				lastErr = gwErr
+
+				if p.canRetry(ctx, gwErr, attempt, maxAttempts) {
+					continue
+				}
+				return nil, gwErr
+
+			case firstEvent, ok = <-streamResp.Events:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+			}
+		} else {
+			// 未设置超时
+			firstEvent, ok = <-streamResp.Events
+		}
+
 		if !ok {
 			attemptCancel()
 			gwErr := service.NewStreamBootstrapError(
@@ -307,12 +378,16 @@ func (p *Pipeline) Stream(ctx context.Context, req *service.GatewayRequest) (*se
 //  3. 不做 image preview 兼容注入
 //  4. 清理 countTokens 不支持的字段
 func (p *Pipeline) CountTokens(ctx context.Context, req *service.GatewayRequest) (*service.GatewayResponse, error) {
-	ctx, requestCtx, err := p.prepareCountTokensRequest(ctx, req)
+	// countTokens 同样受非流式总体执行超时保护。
+	timeoutCtx, cancel := withOptionalTimeout(ctx, p.nonStreamTimeout)
+	defer cancel()
+
+	timeoutCtx, requestCtx, err := p.prepareCountTokensRequest(timeoutCtx, req)
 	if err != nil {
 		return nil, err
 	}
 
-	resp, _, err := p.executeNonStreamWithRetry(ctx, requestCtx)
+	resp, _, err := p.executeNonStreamWithRetry(timeoutCtx, requestCtx)
 	if err != nil {
 		return nil, err
 	}
@@ -470,8 +545,6 @@ func (p *Pipeline) prepareBaseRequest(ctx context.Context, req *service.GatewayR
 		)
 	}
 
-	// session 提取必须在请求体字段剥离之前完成，
-	// 否则 body 中的 session_id / conversation_id 会被删掉导致 session affinity 失效。
 	sessionID := strings.TrimSpace(req.SessionID)
 	if sessionID == "" && p.sessionExtractor != nil {
 		sessionID = strings.TrimSpace(p.sessionExtractor.Extract(req))
@@ -487,10 +560,7 @@ func (p *Pipeline) prepareBaseRequest(ctx context.Context, req *service.GatewayR
 		Streaming:                action.IsStreaming(),
 		SessionID:                sessionID,
 		RequestedAt:              requestedAt,
-
-		// 性能优化：
-		// 模型注册表在启动后是只读的，这里直接持有只读引用，避免每请求 Clone。
-		ModelInfo: modelInfo,
+		ModelInfo:                modelInfo,
 	}
 	return ctx, requestCtx, nil
 }
@@ -520,9 +590,6 @@ func (p *Pipeline) resolveStaticModel(model string) (string, *service.ModelInfo,
 	if canonical == "" {
 		return "", nil, false
 	}
-
-	// 性能优化：
-	// resolveModel 由静态模型注册表提供只读引用，这里不再 Clone。
 	return canonical, info, true
 }
 
@@ -646,10 +713,6 @@ func (p *Pipeline) executeOnce(ctx context.Context, requestCtx *RequestContext, 
 	response := &service.GatewayResponse{
 		RequestID:  requestCtx.RequestID,
 		StatusCode: upstream.StatusCode,
-
-		// 性能优化：
-		// upstream 在本次执行结束后不会再被写入，直接把 Header/Payload 所有权移交给响应对象，
-		// 避免非流式响应重复复制。
 		Headers:    upstream.Headers,
 		Payload:    upstream.Payload,
 		Metadata:   requestCtx.ResponseMetadata(),
@@ -675,9 +738,6 @@ func (p *Pipeline) buildStreamResult(
 	firstEvent wsrelay.StreamEvent,
 	events <-chan wsrelay.StreamEvent,
 ) *service.StreamResult {
-	// 边界保护：
-	// 正常路径下 requestCtx / provider 都不应为 nil。
-	// 这里做兜底，避免极端情况下后续错误处理或日志路径发生空指针。
 	if requestCtx == nil {
 		requestCtx = &RequestContext{}
 	}
@@ -690,8 +750,6 @@ func (p *Pipeline) buildStreamResult(
 		statusCode = http.StatusOK
 	}
 
-	// 性能优化：
-	// 首包 Header 在当前请求生命周期内只读，直接引用，避免复制。
 	headers := firstEvent.Headers
 
 	useSSE := strings.TrimSpace(requestCtx.Alt) == "" || strings.EqualFold(strings.TrimSpace(requestCtx.Alt), "sse")
@@ -746,8 +804,6 @@ func (p *Pipeline) buildStreamResult(
 				}
 
 				if !sendChunk(service.StreamChunk{
-					// 性能优化：
-					// stream adapter 已为当前 chunk 产出独立 payload，这里不再二次 clone。
 					Payload: item.DownstreamPayload,
 					Metadata: map[string]any{
 						"provider_id": provider.ID,
@@ -773,6 +829,47 @@ func (p *Pipeline) buildStreamResult(
 		flushPayload := func(source string) (ok bool, terminal bool, terminalReason string) {
 			return forwardAdapted(adapter.Flush(), source)
 		}
+
+		// ------------------------------
+		// Stream idle timeout 控制
+		// ------------------------------
+		var (
+			idleTimer *time.Timer
+			idleC     <-chan time.Time
+		)
+
+		resetIdleTimer := func() {
+			if p.streamIdleTimeout <= 0 {
+				return
+			}
+			if idleTimer == nil {
+				idleTimer = time.NewTimer(p.streamIdleTimeout)
+				idleC = idleTimer.C
+				return
+			}
+			if !idleTimer.Stop() {
+				select {
+				case <-idleTimer.C:
+				default:
+				}
+			}
+			idleTimer.Reset(p.streamIdleTimeout)
+			idleC = idleTimer.C
+		}
+
+		stopIdleTimer := func() {
+			if idleTimer == nil {
+				return
+			}
+			if !idleTimer.Stop() {
+				select {
+				case <-idleTimer.C:
+				default:
+				}
+			}
+			idleC = nil
+		}
+		defer stopIdleTimer()
 
 		process := func(event wsrelay.StreamEvent) bool {
 			if event.Err != nil {
@@ -856,6 +953,7 @@ func (p *Pipeline) buildStreamResult(
 		if !process(firstEvent) {
 			return
 		}
+		resetIdleTimer()
 
 		// 再持续消费后续事件。
 		for {
@@ -863,6 +961,32 @@ func (p *Pipeline) buildStreamResult(
 			case <-attemptCtx.Done():
 				// 调用方取消或上层主动结束时，尽量冲刷残留缓冲。
 				_, _, _ = flushPayload("attempt_ctx_done_flush")
+				return
+
+			case <-idleC:
+				// 流式输出过程中连续超过 StreamIdleTimeout 未收到任何新事件：
+				// 视为 Provider/上游在中途卡住，主动给客户端下发 504 错误并收尾。
+				idleErr := service.NewUpstreamHTTPError(
+					"upstream stream idle timeout",
+					context.DeadlineExceeded,
+					service.WithStatusCode(http.StatusGatewayTimeout),
+					service.WithRetryable(false),
+					service.WithCooldown(true),
+					service.WithModel(requestCtx.ResolvedModel),
+					service.WithAction(requestCtx.Action),
+					service.WithProviderID(provider.ID),
+					service.WithPublicMessage("上游流式响应空闲超时"),
+				)
+				p.applyProviderCooldown(provider, idleErr)
+
+				_, _, _ = flushPayload("stream_idle_timeout_flush")
+
+				_ = sendChunk(service.StreamChunk{
+					Err: idleErr,
+					Metadata: map[string]any{
+						"provider_id": provider.ID,
+					},
+				})
 				return
 
 			case event, ok := <-events:
@@ -874,6 +998,7 @@ func (p *Pipeline) buildStreamResult(
 				if !process(event) {
 					return
 				}
+				resetIdleTimer()
 			}
 		}
 	}()
@@ -977,15 +1102,24 @@ func (p *Pipeline) classifyTransportError(err error, requestCtx *RequestContext,
 
 	// 超时。
 	if errors.Is(err, context.DeadlineExceeded) {
+		message := "request deadline exceeded"
+		publicMessage := "上游请求超时"
+
+		// 显式捕获 bootstrap timeout 专用日志以提示前端。
+		if strings.Contains(strings.ToLower(err.Error()), "bootstrap timeout") {
+			message = "bootstrap timeout waiting for first upstream packet"
+			publicMessage = "启动首包超时"
+		}
+
 		return service.NewUpstreamProtocolError(
-			"request deadline exceeded",
+			message,
 			err,
 			service.WithModel(requestCtx.ResolvedModel),
 			service.WithAction(requestCtx.Action),
 			service.WithProviderID(providerID(provider)),
 			service.WithRetryable(true),
 			service.WithCooldown(true),
-			service.WithPublicMessage("上游请求超时"),
+			service.WithPublicMessage(publicMessage),
 		)
 	}
 
@@ -1308,6 +1442,7 @@ func extractErrorMessage(body []byte) string {
 	}
 	return text
 }
+
 // detectGeminiTerminalPayload 检测一个 Gemini JSON payload 是否已经表示“逻辑结束”。
 //
 // transport 层的 stream_end 并不总是可靠出现。
@@ -1448,6 +1583,7 @@ func firstNonEmpty(values ...string) string {
 	}
 	return ""
 }
+
 func cloneBytes(in []byte) []byte {
 	if len(in) == 0 {
 		return nil
@@ -1456,9 +1592,29 @@ func cloneBytes(in []byte) []byte {
 	copy(out, in)
 	return out
 }
+
 func maxInt(a, b int) int {
 	if a > b {
 		return a
 	}
 	return b
+}
+
+// withOptionalTimeout 为请求上下文附加一个“最多 timeout”的 deadline。
+// 若父 context 已经带有更短的 deadline，则保留父 context 的更短 deadline。
+// 这样可以避免覆盖客户端自身设置的更严格超时。
+func withOptionalTimeout(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return parent, func() {}
+	}
+
+	if deadline, ok := parent.Deadline(); ok {
+		remaining := time.Until(deadline)
+		// 父 context 已经更短，则只派生一个可取消子 context，不再添加更长超时。
+		if remaining > 0 && remaining <= timeout {
+			return context.WithCancel(parent)
+		}
+	}
+
+	return context.WithTimeout(parent, timeout)
 }

@@ -7,24 +7,44 @@ import "gopkg.in/yaml.v3"
 // ---------------------------------------------------------------------------
 
 const (
-	DefaultHost                = "127.0.0.1"
-	DefaultPort                = 8080
-	DefaultServerReadTimeout   = "30s"
-	DefaultServerWriteTimeout  = "0s" // 默认不限制，避免 SSE 长响应被截断
-	DefaultServerIdleTimeout   = "120s"
+	DefaultHost                  = "127.0.0.1"
+	DefaultPort                  = 8080
+	DefaultServerReadTimeout     = "30s"
+	DefaultServerWriteTimeout    = "0s" // 默认不限制，避免 SSE 长响应被截断
+	DefaultServerIdleTimeout     = "120s"
 	DefaultServerShutdownTimeout = "15s"
 
 	DefaultWebSocketPath      = "/v1/ws"
 	DefaultWSHandshakeTimeout = "10s"
-	DefaultWSReadTimeout      = "300s"
-	DefaultWSWriteTimeout     = "10s"
-	DefaultWSPingInterval     = "30s"
-	DefaultWSPongTimeout      = "120s"
-	DefaultWSMaxMessageSize   int64 = 64 << 20 // 64 MiB
+
+	// DefaultWSReadTimeout 从 60s 提升为 300s (5 分钟)。
+	// 确保长推理模型在产生首个 Token 前的漫长“思考期”内不会被误判断连。
+	DefaultWSReadTimeout = "300s"
+
+	DefaultWSWriteTimeout = "10s"
+	DefaultWSPingInterval = "30s"
+
+	// DefaultWSPongTimeout 从 60s 提升为 120s (2 分钟)。
+	// 给 Provider 在高并发或主线程繁忙时留足回复 Pong 的余量。
+	DefaultWSPongTimeout = "120s"
+
+	DefaultWSMaxMessageSize int64 = 64 << 20 // 64 MiB
 
 	DefaultRoutingStrategy    = "round_robin"
 	DefaultSessionAffinityTTL = "1h"
 	DefaultProviderCooldown   = "5m"
+
+	// DefaultBootstrapTimeout 启动首包超时 (默认 60s)。
+	// 从发出请求到收到第一个有效上游响应包（如 stream_start）的最长等待时间。
+	DefaultBootstrapTimeout = "60s"
+
+	// DefaultStreamIdleTimeout 流式空闲中断超时 (默认 90s)。
+	// 流式传输过程中，连续两帧 chunk 之间的最长允许间隔。
+	DefaultStreamIdleTimeout = "90s"
+
+	// DefaultNonStreamTimeout 非流式总体执行超时 (默认 600s)。
+	// 适用于 generateContent / countTokens 的单次完整执行时间上限。
+	DefaultNonStreamTimeout = "600s"
 
 	DefaultModelsSource = "embedded"
 
