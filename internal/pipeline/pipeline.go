@@ -774,7 +774,7 @@ func (p *Pipeline) buildStreamResult(
 			if strings.TrimSpace(reason) == "" {
 				reason = "UNKNOWN"
 			}
-			p.logger.InfoContext(ctx, "pipeline stream reached logical terminal payload",
+			p.logger.DebugContext(ctx, "pipeline stream reached logical terminal payload",
 				"request_id", requestCtx.RequestID,
 				"provider_id", provider.ID,
 				"model", requestCtx.ResolvedModel,
