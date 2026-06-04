@@ -1,0 +1,1590 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AIStudio Gateway 可视化面板</title>
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Vue 3 -->
+  <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+  <!-- FontAwesome -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/>
+
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            darkbg: '#0f172a',
+            darkcard: '#1e293b',
+            darkline: '#334155'
+          },
+          animation: {
+            'pulse-fast': 'pulse 1.5s cubic-bezier(0.4,0,0.6,1) infinite',
+            'float-soft': 'floatSoft 4s ease-in-out infinite',
+          },
+          keyframes: {
+            floatSoft: {
+              '0%,100%': { transform: 'translateY(0px)' },
+              '50%': { transform: 'translateY(-4px)' }
+            }
+          },
+          boxShadow: {
+            panel: '0 8px 30px rgba(2, 6, 23, 0.06)',
+            panelDark: '0 8px 30px rgba(0, 0, 0, 0.25)'
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    [v-cloak] {
+      display: none !important;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background-color: #f8fafc;
+      transition: background-color 0.3s ease, color 0.3s ease;
+    }
+    .dark body {
+      background-color: #0f172a;
+      color: #f8fafc;
+    }
+
+    ::-webkit-scrollbar { width: 7px; height: 7px; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 999px; }
+    .dark ::-webkit-scrollbar-thumb { background: #475569; }
+
+    .glass-header {
+      background: rgba(255,255,255,0.82);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-bottom: 1px solid rgba(0,0,0,0.05);
+    }
+    .dark .glass-header {
+      background: rgba(15,23,42,0.82);
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+    }
+
+    .list-enter-active, .list-leave-active {
+      transition: all 0.35s ease;
+    }
+    .list-enter-from, .list-leave-to {
+      opacity: 0;
+      transform: translateY(12px);
+    }
+
+    .fade-enter-active, .fade-leave-active {
+      transition: opacity .25s ease;
+    }
+    .fade-enter-from, .fade-leave-to {
+      opacity: 0;
+    }
+
+    .drawer-enter-active, .drawer-leave-active {
+      transition: all .3s ease;
+    }
+    .drawer-enter-from, .drawer-leave-to {
+      opacity: 0;
+      transform: translateX(24px);
+    }
+
+    .line-clamp-2 {
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+      overflow: hidden;
+    }
+
+    .grid-auto-fit {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 1rem;
+    }
+
+    .status-dot {
+      position: relative;
+      display: inline-flex;
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      flex-shrink: 0;
+    }
+    .status-dot.active { background: #22c55e; }
+    .status-dot.cooling { background: #f59e0b; }
+    .status-dot.problem { background: #ef4444; }
+
+    .status-dot.active::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      background: rgba(34, 197, 94, 0.4);
+      animation: pulse 1.8s infinite;
+    }
+  </style>
+</head>
+<body>
+<div id="app" v-cloak class="min-h-screen flex flex-col transition-colors duration-300">
+
+  <!-- Header -->
+  <header class="glass-header sticky top-0 z-50">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-4">
+      <div class="flex items-center gap-3 min-w-0">
+        <div class="w-9 h-9 rounded-xl bg-blue-600 flex items-center justify-center text-white shadow-lg shadow-blue-500/30 animate-float-soft">
+          <i class="fa-solid fa-network-wired"></i>
+        </div>
+        <div class="min-w-0">
+          <h1 class="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-indigo-600 dark:from-blue-400 dark:to-indigo-400 truncate">
+            AIStudio Gateway 可视化面板
+          </h1>
+          <div class="text-xs text-gray-500 dark:text-gray-400 truncate">
+            同源内置页面 · 生产状态总览 · Provider 监控
+          </div>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-3 flex-wrap justify-end">
+        <div class="flex items-center bg-gray-100 dark:bg-gray-800 rounded-full p-1 border border-gray-200 dark:border-gray-700 min-w-[300px] max-w-[420px] w-[32vw]">
+          <input
+            v-model="httpKey"
+            type="password"
+            placeholder="输入 HTTP 密钥（仅用于拉取状态）"
+            class="bg-transparent border-none outline-none px-3 text-sm w-full text-gray-700 dark:text-gray-300 focus:ring-0"
+            @keyup.enter="fetchData"
+          />
+          <button
+            @click="fetchData"
+            :disabled="loading"
+            class="bg-white dark:bg-gray-700 px-3 py-1 rounded-full text-sm font-medium shadow-sm hover:shadow text-blue-600 dark:text-blue-400 transition cursor-pointer shrink-0"
+          >
+            <i class="fa-solid fa-link mr-1"></i>连接
+          </button>
+        </div>
+
+        <div class="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
+          <span>自动刷新</span>
+          <button
+            @click="toggleAutoRefresh"
+            :class="autoRefresh ? 'bg-green-500' : 'bg-gray-300 dark:bg-gray-600'"
+            class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none shadow-inner"
+          >
+            <span
+              :class="autoRefresh ? 'translate-x-4' : 'translate-x-0'"
+              class="pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"
+            ></span>
+          </button>
+        </div>
+
+        <div v-if="autoRefresh" class="text-xs text-gray-500 dark:text-gray-400 min-w-[72px] text-right">
+          {{ refreshCountdownText }}
+        </div>
+
+        <button
+          @click="toggleDarkMode"
+          class="w-9 h-9 rounded-full bg-gray-200 dark:bg-gray-800 flex items-center justify-center text-gray-600 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-700 transition cursor-pointer"
+          title="切换明暗模式"
+        >
+          <i :class="isDark ? 'fa-solid fa-sun text-yellow-400' : 'fa-solid fa-moon text-indigo-600'"></i>
+        </button>
+      </div>
+    </div>
+
+    <div v-if="autoRefresh" class="h-0.5 bg-gray-200 dark:bg-gray-800 w-full overflow-hidden">
+      <div
+        class="h-full bg-blue-500 transition-all ease-linear"
+        :style="{ width: refreshProgress + '%' }"
+      ></div>
+    </div>
+  </header>
+
+  <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
+
+    <!-- 初始空状态 -->
+    <div v-if="!data && !loading && !error" class="bg-white dark:bg-darkcard rounded-2xl p-10 border border-gray-100 dark:border-gray-800 shadow-panel dark:shadow-panelDark text-center">
+      <div class="w-20 h-20 mx-auto rounded-3xl bg-blue-50 dark:bg-blue-950/30 flex items-center justify-center text-blue-500 text-4xl mb-5">
+        <i class="fa-solid fa-satellite-dish"></i>
+      </div>
+      <h2 class="text-2xl font-bold text-gray-800 dark:text-white mb-2">欢迎使用网关状态面板</h2>
+      <p class="text-gray-500 dark:text-gray-400 mb-6 max-w-2xl mx-auto">
+        当前页面已内置在网关内部，数据将从
+        <span class="font-mono text-blue-600 dark:text-blue-400">{{ statusEndpoint }}</span>
+        同源拉取。请输入 HTTP 密钥后点击“连接”。
+      </p>
+      <div class="grid md:grid-cols-3 gap-4 max-w-4xl mx-auto text-left">
+        <div class="rounded-xl border border-gray-100 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50 p-4">
+          <div class="font-bold text-gray-800 dark:text-white mb-2"><i class="fa-solid fa-heart-pulse text-green-500 mr-2"></i>运行状态</div>
+          <div class="text-sm text-gray-500 dark:text-gray-400">查看在线 Provider、可选通道数、冷却状态、待处理请求总数。</div>
+        </div>
+        <div class="rounded-xl border border-gray-100 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50 p-4">
+          <div class="font-bold text-gray-800 dark:text-white mb-2"><i class="fa-solid fa-bug text-red-500 mr-2"></i>异常排查</div>
+          <div class="text-sm text-gray-500 dark:text-gray-400">快速定位掉线、最近错误、状态变化和事件时间线。</div>
+        </div>
+        <div class="rounded-xl border border-gray-100 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50 p-4">
+          <div class="font-bold text-gray-800 dark:text-white mb-2"><i class="fa-solid fa-boxes-stacked text-cyan-500 mr-2"></i>账号分组</div>
+          <div class="text-sm text-gray-500 dark:text-gray-400">根据 Label 前缀自动聚合，适合多容器、多账号批量部署场景。</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Loading -->
+    <div v-else-if="loading && !data" class="flex flex-col items-center justify-center h-72 text-gray-400">
+      <i class="fa-solid fa-circle-notch fa-spin text-4xl text-blue-500 mb-4"></i>
+      <p>正在拉取网关数据...</p>
+    </div>
+
+    <!-- Error (首次加载失败) -->
+    <div v-else-if="error && !data" class="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-2xl p-6 text-center shadow-sm">
+      <i class="fa-solid fa-triangle-exclamation text-red-500 text-3xl mb-2"></i>
+      <h3 class="text-lg font-bold text-red-700 dark:text-red-400">连接失败</h3>
+      <p class="text-red-600 dark:text-red-300 mt-1 break-all">{{ error }}</p>
+      <p class="text-sm text-gray-500 mt-4">
+        请检查 HTTP 密钥是否正确，或确认状态接口可用。
+      </p>
+    </div>
+
+    <template v-else-if="data">
+      <!-- 顶部总览 -->
+      <section class="grid grid-cols-1 lg:grid-cols-4 gap-6 mb-8">
+        <!-- 服务 -->
+        <div class="bg-white dark:bg-darkcard rounded-2xl p-5 shadow-panel dark:shadow-panelDark border border-gray-100 dark:border-gray-800 hover:-translate-y-1 transition duration-300">
+          <div class="flex items-center justify-between mb-4">
+            <h3 class="text-gray-500 dark:text-gray-400 font-semibold text-sm uppercase tracking-wider">服务信息</h3>
+            <i class="fa-solid fa-server text-blue-500"></i>
+          </div>
+          <div class="text-2xl font-bold text-gray-800 dark:text-white">{{ safeService.version }}</div>
+          <div class="text-sm text-gray-500 dark:text-gray-400 mt-1 truncate">Commit: {{ safeService.commit }}</div>
+          <div class="mt-4 space-y-2 text-sm">
+            <div class="flex justify-between gap-3">
+              <span class="text-gray-500">构建时间</span>
+              <span class="text-gray-800 dark:text-gray-300 text-right">{{ formatDateTime(safeService.build_time) || safeService.build_time }}</span>
+            </div>
+            <div class="flex justify-between gap-3">
+              <span class="text-gray-500">当前时间</span>
+              <span class="text-gray-800 dark:text-gray-300 text-right">{{ formatDateTime(safeService.time) }}</span>
+            </div>
+            <div class="flex justify-between gap-3">
+              <span class="text-gray-500">运行时长</span>
+              <span class="font-medium text-indigo-600 dark:text-indigo-400">{{ formatUptime(safeService.uptime_seconds) }}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 路由 -->
+        <div class="bg-white dark:bg-darkcard rounded-2xl p-5 shadow-panel dark:shadow-panelDark border border-gray-100 dark:border-gray-800 hover:-translate-y-1 transition duration-300">
+          <div class="flex items-center justify-between mb-4">
+            <h3 class="text-gray-500 dark:text-gray-400 font-semibold text-sm uppercase tracking-wider">路由策略</h3>
+            <i class="fa-solid fa-route text-indigo-500"></i>
+          </div>
+          <div class="text-2xl font-bold text-gray-800 dark:text-white capitalize">{{ formatStrategy(safeRouting.strategy) }}</div>
+          <div class="mt-4 space-y-2 text-sm">
+            <div class="flex justify-between gap-3">
+              <span class="text-gray-500">Bootstrap 重试</span>
+              <span class="text-gray-800 dark:text-gray-300">{{ safeRouting.bootstrap_retries }}</span>
+            </div>
+            <div class="flex justify-between gap-3">
+              <span class="text-gray-500">Provider 冷却</span>
+              <span class="text-gray-800 dark:text-gray-300">{{ safeRouting.provider_cooldown }}</span>
+            </div>
+            <div class="flex justify-between gap-3">
+              <span class="text-gray-500">刷新状态</span>
+              <span :class="autoRefresh ? 'text-green-600 dark:text-green-400' : 'text-gray-800 dark:text-gray-300'">
+                {{ autoRefresh ? '已开启' : '未开启' }}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Provider 健康 -->
+        <div class="bg-white dark:bg-darkcard rounded-2xl p-5 shadow-panel dark:shadow-panelDark border border-gray-100 dark:border-gray-800 hover:-translate-y-1 transition duration-300 relative overflow-hidden">
+          <div class="absolute -right-8 -top-8 text-green-500/10 dark:text-green-400/5 text-9xl">
+            <i class="fa-solid fa-heart-pulse"></i>
+          </div>
+          <div class="flex items-center justify-between mb-4 relative z-10">
+            <h3 class="text-gray-500 dark:text-gray-400 font-semibold text-sm uppercase tracking-wider">通道健康度</h3>
+            <i class="fa-solid fa-check-circle text-green-500 animate-pulse"></i>
+          </div>
+          <div class="flex items-end gap-2 relative z-10">
+            <span class="text-3xl font-bold text-gray-800 dark:text-white">{{ safeSummary.selectable }}</span>
+            <span class="text-sm text-gray-500">/ {{ safeSummary.connected }} 可选</span>
+          </div>
+          <div class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-700 flex flex-wrap gap-3 text-sm relative z-10">
+            <span class="text-green-600 dark:text-green-400"><i class="fa-solid fa-circle text-[10px] mr-1"></i>{{ safeSummary.active }} 活跃</span>
+            <span class="text-yellow-500 dark:text-yellow-400"><i class="fa-solid fa-snowflake text-[10px] mr-1"></i>{{ safeSummary.cooling }} 冷却</span>
+            <span class="text-red-500 dark:text-red-400"><i class="fa-solid fa-ban text-[10px] mr-1"></i>{{ safeSummary.disabled }} 禁用</span>
+          </div>
+        </div>
+
+        <!-- 请求状态 -->
+        <div class="bg-white dark:bg-darkcard rounded-2xl p-5 shadow-panel dark:shadow-panelDark border border-gray-100 dark:border-gray-800 hover:-translate-y-1 transition duration-300">
+          <div class="flex items-center justify-between mb-4">
+            <h3 class="text-gray-500 dark:text-gray-400 font-semibold text-sm uppercase tracking-wider">请求状态</h3>
+            <i class="fa-solid fa-layer-group text-amber-500"></i>
+          </div>
+          <div class="text-2xl font-bold text-gray-800 dark:text-white">
+            {{ safeSummary.pending_requests_total }}
+          </div>
+          <div class="text-sm text-gray-500 dark:text-gray-400 mt-1">当前待处理请求总数</div>
+          <div class="mt-4 space-y-2 text-sm">
+            <div class="flex justify-between gap-3">
+              <span class="text-gray-500">最近事件数</span>
+              <span class="text-gray-800 dark:text-gray-300">{{ recentEvents.length }}</span>
+            </div>
+            <div class="flex justify-between gap-3">
+              <span class="text-gray-500">最近异常数</span>
+              <span class="text-red-600 dark:text-red-400">{{ recentErrorCount }}</span>
+            </div>
+            <div class="flex justify-between gap-3">
+              <span class="text-gray-500">分组数</span>
+              <span class="text-gray-800 dark:text-gray-300">{{ groupCards.length }}</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 次级概览 -->
+      <section class="grid grid-cols-1 xl:grid-cols-3 gap-6 mb-8">
+        <div class="xl:col-span-2 bg-white dark:bg-darkcard rounded-2xl p-5 shadow-panel dark:shadow-panelDark border border-gray-100 dark:border-gray-800">
+          <div class="flex items-center justify-between mb-4">
+            <div class="flex items-center gap-2">
+              <i class="fa-solid fa-diagram-project text-cyan-500"></i>
+              <h2 class="text-lg font-bold text-gray-800 dark:text-white">容器 / 账号分组概览</h2>
+            </div>
+            <span class="text-xs text-gray-500 dark:text-gray-400">根据 Label 前缀自动聚合</span>
+          </div>
+
+          <div class="grid-auto-fit">
+            <div
+              v-for="g in groupCards"
+              :key="g.key"
+              class="rounded-xl p-4 border border-gray-100 dark:border-gray-700 bg-gray-50/80 dark:bg-gray-800/40 hover:shadow-md transition"
+            >
+              <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                  <div class="text-sm text-gray-500 dark:text-gray-400">分组</div>
+                  <div class="text-lg font-bold text-gray-800 dark:text-white break-all">{{ g.key }}</div>
+                </div>
+                <div class="w-10 h-10 rounded-xl bg-cyan-100 dark:bg-cyan-900/30 text-cyan-600 dark:text-cyan-400 flex items-center justify-center">
+                  <i class="fa-solid fa-boxes-stacked"></i>
+                </div>
+              </div>
+
+              <div class="grid grid-cols-3 gap-2 mt-4 text-sm">
+                <div class="rounded-lg bg-white dark:bg-gray-900/40 border border-gray-100 dark:border-gray-700 p-2">
+                  <div class="text-gray-500 text-[11px]">总数</div>
+                  <div class="font-bold text-gray-800 dark:text-gray-100">{{ g.total }}</div>
+                </div>
+                <div class="rounded-lg bg-white dark:bg-gray-900/40 border border-gray-100 dark:border-gray-700 p-2">
+                  <div class="text-gray-500 text-[11px]">活跃</div>
+                  <div class="font-bold text-green-600 dark:text-green-400">{{ g.active }}</div>
+                </div>
+                <div class="rounded-lg bg-white dark:bg-gray-900/40 border border-gray-100 dark:border-gray-700 p-2">
+                  <div class="text-gray-500 text-[11px]">待处理</div>
+                  <div class="font-bold text-blue-600 dark:text-blue-400">{{ g.pending }}</div>
+                </div>
+              </div>
+
+              <div class="mt-3 flex flex-wrap gap-1.5">
+                <span
+                  v-for="sample in g.samples"
+                  :key="sample.id"
+                  class="px-2 py-1 rounded-full text-[11px] bg-white dark:bg-gray-900/40 border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300"
+                  :title="sample.label"
+                >{{ sample.short }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="bg-white dark:bg-darkcard rounded-2xl p-5 shadow-panel dark:shadow-panelDark border border-gray-100 dark:border-gray-800">
+          <div class="flex items-center gap-2 mb-4">
+            <i class="fa-solid fa-wave-square text-emerald-500"></i>
+            <h2 class="text-lg font-bold text-gray-800 dark:text-white">事件概览</h2>
+          </div>
+
+          <div class="space-y-3">
+            <div class="flex items-center justify-between p-3 rounded-xl bg-gray-50 dark:bg-gray-800/50 border border-gray-100 dark:border-gray-700">
+              <div class="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300">
+                <i class="fa-solid fa-link text-green-500"></i> 已连接
+              </div>
+              <div class="font-bold text-green-600 dark:text-green-400">{{ eventStats.connected }}</div>
+            </div>
+
+            <div class="flex items-center justify-between p-3 rounded-xl bg-gray-50 dark:bg-gray-800/50 border border-gray-100 dark:border-gray-700">
+              <div class="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300">
+                <i class="fa-solid fa-link-slash text-red-500"></i> 已断开
+              </div>
+              <div class="font-bold text-red-600 dark:text-red-400">{{ eventStats.disconnected }}</div>
+            </div>
+
+            <div class="flex items-center justify-between p-3 rounded-xl bg-gray-50 dark:bg-gray-800/50 border border-gray-100 dark:border-gray-700">
+              <div class="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300">
+                <i class="fa-solid fa-shuffle text-blue-500"></i> 状态变化
+              </div>
+              <div class="font-bold text-blue-600 dark:text-blue-400">{{ eventStats.state_changed + eventStats.replaced }}</div>
+            </div>
+
+            <div class="pt-2 text-xs text-gray-500 dark:text-gray-400">
+              <div class="mb-1">最近一条事件：</div>
+              <div class="rounded-lg bg-gray-50 dark:bg-gray-800/50 p-3 border border-gray-100 dark:border-gray-700">
+                <template v-if="filteredEvents.length">
+                  <div class="font-semibold text-gray-700 dark:text-gray-200 break-words">{{ filteredEvents[0].message }}</div>
+                  <div class="mt-1">{{ formatDateTime(filteredEvents[0].at) }}</div>
+                </template>
+                <template v-else>
+                  暂无事件
+                </template>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 工具栏 -->
+      <section class="bg-white dark:bg-darkcard rounded-2xl p-4 shadow-panel dark:shadow-panelDark border border-gray-100 dark:border-gray-800 mb-8">
+        <div class="flex flex-col lg:flex-row gap-4 lg:items-center lg:justify-between">
+          <div class="flex items-center gap-2">
+            <i class="fa-solid fa-sliders text-indigo-500"></i>
+            <h2 class="text-lg font-bold text-gray-800 dark:text-white">Provider 浏览器</h2>
+          </div>
+
+          <div class="flex flex-col xl:flex-row gap-3 xl:items-center w-full xl:w-auto">
+            <div class="flex items-center gap-2 bg-gray-100 dark:bg-gray-800 rounded-full px-3 py-2 border border-gray-200 dark:border-gray-700">
+              <i class="fa-solid fa-magnifying-glass text-gray-400"></i>
+              <input
+                v-model="searchText"
+                type="text"
+                placeholder="搜索 label / id / connection_id"
+                class="bg-transparent outline-none border-none text-sm w-72 text-gray-700 dark:text-gray-300"
+              />
+            </div>
+
+            <div class="flex items-center gap-2 flex-wrap">
+              <select v-model="stateFilter" class="bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2 text-sm text-gray-700 dark:text-gray-300">
+                <option value="all">全部状态</option>
+                <option value="active">仅活跃</option>
+                <option value="cooling">仅冷却</option>
+                <option value="disabled">仅禁用</option>
+                <option value="problem">仅异常 / 有错误</option>
+              </select>
+
+              <select v-model="sortKey" class="bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2 text-sm text-gray-700 dark:text-gray-300">
+                <option value="state">按状态</option>
+                <option value="label">按标签</option>
+                <option value="last_seen">按最近活跃</option>
+                <option value="connected_at">按连接时间</option>
+                <option value="pending">按待处理请求</option>
+              </select>
+
+              <button
+                @click="sortDesc = !sortDesc"
+                class="px-3 py-2 rounded-xl bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700"
+                :title="sortDesc ? '当前降序，点击改升序' : '当前升序，点击改降序'"
+              >
+                <i :class="sortDesc ? 'fa-solid fa-arrow-down-wide-short' : 'fa-solid fa-arrow-up-wide-short'"></i>
+              </button>
+
+              <button
+                @click="copyAllJSON"
+                class="px-3 py-2 rounded-xl bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700"
+                title="复制完整状态 JSON"
+              >
+                <i class="fa-regular fa-copy mr-1"></i>复制全部 JSON
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="mt-4 flex flex-wrap gap-2 text-xs">
+          <button
+            class="px-3 py-1.5 rounded-full border transition"
+            :class="stateFilter==='all' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-300 border-gray-200 dark:border-gray-700'"
+            @click="stateFilter='all'"
+          >全部 {{ allProviders.length }}</button>
+
+          <button
+            class="px-3 py-1.5 rounded-full border transition"
+            :class="stateFilter==='active' ? 'bg-green-600 text-white border-green-600' : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-300 border-gray-200 dark:border-gray-700'"
+            @click="stateFilter='active'"
+          >活跃 {{ activeCount }}</button>
+
+          <button
+            class="px-3 py-1.5 rounded-full border transition"
+            :class="stateFilter==='cooling' ? 'bg-yellow-500 text-white border-yellow-500' : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-300 border-gray-200 dark:border-gray-700'"
+            @click="stateFilter='cooling'"
+          >冷却 {{ coolingCount }}</button>
+
+          <button
+            class="px-3 py-1.5 rounded-full border transition"
+            :class="stateFilter==='problem' ? 'bg-red-600 text-white border-red-600' : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-300 border-gray-200 dark:border-gray-700'"
+            @click="stateFilter='problem'"
+          >异常 {{ problemCount }}</button>
+        </div>
+      </section>
+
+      <!-- 主体双栏 -->
+      <section class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+        <!-- Providers -->
+        <div class="lg:col-span-2">
+          <div class="flex items-center justify-between mb-4">
+            <h2 class="text-xl font-bold text-gray-800 dark:text-white">
+              Provider 卡片 ({{ filteredProviders.length }})
+            </h2>
+            <div class="text-sm text-gray-500 dark:text-gray-400">
+              点击卡片查看完整详情
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <transition-group name="list">
+              <button
+                v-for="p in filteredProviders"
+                :key="p.id"
+                @click="selectProvider(p)"
+                class="text-left bg-white dark:bg-darkcard rounded-2xl p-4 shadow-panel dark:shadow-panelDark border hover:shadow-md hover:-translate-y-1 transition-all duration-300 cursor-pointer"
+                :class="providerCardClass(p)"
+              >
+                <div class="flex justify-between items-start gap-3 mb-2">
+                  <div class="min-w-0 flex-1">
+                    <div class="flex items-center gap-2">
+                      <span class="status-dot" :class="providerDotClass(p)"></span>
+                      <h4 class="font-bold text-gray-800 dark:text-gray-100 truncate text-lg" :title="p.label">{{ p.label }}</h4>
+                      <span v-if="p.selectable" class="text-[10px] px-2 py-0.5 rounded-full bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400 border border-green-200 dark:border-green-800">可选</span>
+                    </div>
+                    <div class="text-xs text-gray-400 dark:text-gray-500 font-mono truncate mt-0.5">
+                      {{ p.id }} · {{ p.connection_id }}
+                    </div>
+                  </div>
+
+                  <span
+                    class="px-2.5 py-1 rounded-full text-xs font-bold uppercase tracking-wide shrink-0 border"
+                    :class="providerBadgeClass(p)"
+                  >
+                    <i :class="providerBadgeIcon(p)"></i>{{ p.state }}
+                  </span>
+                </div>
+
+                <div class="grid grid-cols-2 gap-2 mt-4 mb-3">
+                  <div class="bg-gray-50 dark:bg-gray-800/50 rounded-xl p-2.5">
+                    <div class="text-[10px] text-gray-500 uppercase mb-1">最后活跃</div>
+                    <div class="text-sm font-medium text-gray-700 dark:text-gray-300 flex items-center gap-1">
+                      <i class="fa-regular fa-clock text-gray-400"></i>{{ timeAgo(p.last_seen_at) }}
+                    </div>
+                  </div>
+
+                  <div class="bg-gray-50 dark:bg-gray-800/50 rounded-xl p-2.5 relative">
+                    <div class="text-[10px] text-gray-500 uppercase mb-1">待处理请求</div>
+                    <div class="text-sm font-bold flex items-center gap-1" :class="p.pending_requests > 0 ? 'text-blue-600 dark:text-blue-400' : 'text-gray-700 dark:text-gray-300'">
+                      <i class="fa-solid fa-layer-group text-gray-400"></i>{{ p.pending_requests }}
+                    </div>
+                    <span v-if="p.pending_requests > 0" class="absolute top-2 right-2 h-2 w-2">
+                      <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
+                      <span class="relative inline-flex rounded-full h-2 w-2 bg-blue-500"></span>
+                    </span>
+                  </div>
+
+                  <div class="bg-gray-50 dark:bg-gray-800/50 rounded-xl p-2.5">
+                    <div class="text-[10px] text-gray-500 uppercase mb-1">连接时长</div>
+                    <div class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                      {{ durationSince(p.connected_at) }}
+                    </div>
+                  </div>
+
+                  <div class="bg-gray-50 dark:bg-gray-800/50 rounded-xl p-2.5">
+                    <div class="text-[10px] text-gray-500 uppercase mb-1">优先级</div>
+                    <div class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                      {{ p.priority }}
+                    </div>
+                  </div>
+                </div>
+
+                <div v-if="p.state === 'cooling' || hasProviderIssue(p)" class="mt-2 text-xs bg-red-50 dark:bg-red-950/30 text-red-600 dark:text-red-400 p-3 rounded-xl border border-red-100 dark:border-red-900/50">
+                  <div v-if="p.state === 'cooling'" class="mb-1 font-bold text-yellow-600 dark:text-yellow-500">
+                    <i class="fa-solid fa-stopwatch mr-1"></i>冷却剩余: {{ p.cooldown_remaining_seconds }}s
+                  </div>
+                  <div class="line-clamp-2" :title="providerIssueText(p)">
+                    <i class="fa-solid fa-bug mr-1"></i>{{ providerIssueText(p) }}
+                  </div>
+                  <div v-if="p.last_error_at || p.last_disconnect_at || p.last_state_at" class="text-[10px] text-red-400 dark:text-red-500 mt-1">
+                    {{ formatDateTime(p.last_error_at || p.last_disconnect_at || p.last_state_at) }}
+                  </div>
+                </div>
+
+                <div class="mt-3 flex flex-wrap gap-1.5">
+                  <span
+                    v-for="cap in formatCaps(p.capabilities)"
+                    :key="cap"
+                    class="px-2 py-0.5 bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 text-[10px] rounded border border-gray-200 dark:border-gray-600"
+                  >
+                    {{ cap }}
+                  </span>
+                  <span
+                    v-if="!p.capabilities || p.capabilities.length === 0"
+                    class="px-2 py-0.5 bg-gray-100 dark:bg-gray-700 text-gray-400 text-[10px] rounded border border-gray-200 dark:border-gray-600"
+                  >
+                    无能力标签
+                  </span>
+                </div>
+              </button>
+            </transition-group>
+          </div>
+
+          <div v-if="filteredProviders.length === 0" class="text-center py-12 bg-white dark:bg-darkcard rounded-2xl border border-dashed border-gray-300 dark:border-gray-700">
+            <i class="fa-solid fa-plug-circle-xmark text-4xl text-gray-300 dark:text-gray-600 mb-3"></i>
+            <p class="text-gray-500 dark:text-gray-400">当前筛选条件下没有匹配到 Provider。</p>
+          </div>
+
+          <!-- Raw JSON -->
+          <div class="mt-8 bg-white dark:bg-darkcard rounded-2xl p-5 shadow-panel dark:shadow-panelDark border border-gray-100 dark:border-gray-800">
+            <div class="flex items-center justify-between mb-4">
+              <div class="flex items-center gap-2">
+                <i class="fa-solid fa-code text-purple-500"></i>
+                <h2 class="text-lg font-bold text-gray-800 dark:text-white">原始状态 JSON</h2>
+              </div>
+              <div class="flex items-center gap-2">
+                <button
+                  @click="copyAllJSON"
+                  class="px-3 py-2 rounded-xl bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700"
+                >
+                  <i class="fa-regular fa-copy mr-1"></i>复制
+                </button>
+                <button
+                  @click="rawExpanded = !rawExpanded"
+                  class="px-3 py-2 rounded-xl bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700"
+                >
+                  <i :class="rawExpanded ? 'fa-solid fa-chevron-up mr-1' : 'fa-solid fa-chevron-down mr-1'"></i>
+                  {{ rawExpanded ? '收起' : '展开' }}
+                </button>
+              </div>
+            </div>
+
+            <div v-if="rawExpanded" class="rounded-xl overflow-hidden border border-gray-200 dark:border-gray-700">
+              <pre class="text-xs leading-6 p-4 bg-gray-50 dark:bg-gray-950/50 text-gray-700 dark:text-gray-300 overflow-x-auto whitespace-pre-wrap break-all">{{ prettyJSON }}</pre>
+            </div>
+            <div v-else class="text-sm text-gray-500 dark:text-gray-400">
+              已折叠，点击“展开”查看完整响应内容。
+            </div>
+          </div>
+        </div>
+
+        <!-- 事件栏 -->
+        <div class="lg:col-span-1">
+          <div class="bg-white dark:bg-darkcard rounded-2xl p-5 shadow-panel dark:shadow-panelDark border border-gray-100 dark:border-gray-800 sticky top-24">
+            <div class="flex items-center gap-2 mb-4 pb-4 border-b border-gray-100 dark:border-gray-700">
+              <i class="fa-solid fa-bolt text-amber-500"></i>
+              <h2 class="text-lg font-bold text-gray-800 dark:text-white">事件动态</h2>
+              <span class="ml-auto text-xs bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400 px-2 py-1 rounded-full">
+                {{ filteredEvents.length }} 条
+              </span>
+            </div>
+
+            <div class="flex gap-2 mb-4 flex-wrap">
+              <button
+                v-for="filter in eventFilterOptions"
+                :key="filter.value"
+                @click="eventFilter = filter.value"
+                class="px-3 py-1.5 rounded-full text-xs border transition"
+                :class="eventFilter===filter.value
+                  ? 'bg-indigo-600 text-white border-indigo-600'
+                  : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-300 border-gray-200 dark:border-gray-700'"
+              >
+                {{ filter.label }}
+              </button>
+            </div>
+
+            <div class="relative max-h-[720px] overflow-y-auto pr-2">
+              <div class="absolute left-[15px] top-2 bottom-0 w-0.5 bg-gray-200 dark:bg-gray-700 z-0"></div>
+
+              <transition-group name="list">
+                <div
+                  v-for="(ev, idx) in filteredEvents"
+                  :key="ev.at + idx + (ev.provider_id || '')"
+                  class="relative z-10 pl-10 mb-6 last:mb-0"
+                >
+                  <div
+                    class="absolute left-0 top-0.5 w-8 h-8 rounded-full border-4 border-white dark:border-darkcard flex items-center justify-center text-[10px]"
+                    :class="eventNodeClass(ev)"
+                  >
+                    <i :class="eventIconClass(ev)"></i>
+                  </div>
+
+                  <div class="text-xs text-gray-400 dark:text-gray-500 mb-1 tracking-wide">
+                    {{ formatTimeOnly(ev.at) }}
+                  </div>
+
+                  <div class="bg-gray-50 dark:bg-gray-800/50 p-3 rounded-xl border border-gray-100 dark:border-gray-700">
+                    <div class="font-bold text-gray-700 dark:text-gray-200 text-sm mb-1 break-all flex items-center justify-between gap-2">
+                      <span class="truncate block w-3/4" :title="ev.provider_id || 'System'">
+                        {{ eventProviderShort(ev) }}
+                      </span>
+                      <span
+                        v-if="ev.provider_state"
+                        class="text-[9px] uppercase px-1.5 py-0.5 rounded bg-white dark:bg-gray-700 border border-gray-200 dark:border-gray-600 shrink-0"
+                      >
+                        {{ ev.provider_state }}
+                      </span>
+                    </div>
+
+                    <div class="text-xs text-gray-600 dark:text-gray-400 leading-relaxed break-words">
+                      {{ ev.message }}
+                    </div>
+
+                    <div v-if="ev.metadata" class="mt-2 space-y-1">
+                      <div
+                        v-for="(v, k) in ev.metadata"
+                        :key="k"
+                        class="text-[10px] text-gray-500 dark:text-gray-500 bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 rounded break-words"
+                      >
+                        <span class="font-semibold text-gray-600 dark:text-gray-400">{{ k }}:</span> {{ v }}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </transition-group>
+
+              <div v-if="filteredEvents.length === 0" class="text-sm text-gray-500 text-center py-4">
+                当前筛选下暂无事件
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 页面底部错误提示（已有数据情况下） -->
+      <div v-if="error && data" class="mt-8 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-2xl p-4 text-sm text-yellow-700 dark:text-yellow-300">
+        <i class="fa-solid fa-triangle-exclamation mr-2"></i>
+        最近一次刷新失败：{{ error }}
+      </div>
+    </template>
+  </main>
+
+  <!-- Provider Detail Drawer -->
+  <transition name="fade">
+    <div
+      v-if="selectedProvider"
+      class="fixed inset-0 bg-black/40 z-[60]"
+      @click="selectedProvider = null"
+    ></div>
+  </transition>
+
+  <transition name="drawer">
+    <aside
+      v-if="selectedProvider"
+      class="fixed top-0 right-0 h-full w-full sm:w-[680px] z-[70] bg-white dark:bg-darkbg shadow-2xl border-l border-gray-200 dark:border-gray-800 flex flex-col"
+    >
+      <div class="h-16 px-5 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between shrink-0">
+        <div class="min-w-0">
+          <div class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">Provider 详情</div>
+          <div class="text-lg font-bold text-gray-800 dark:text-white truncate">{{ selectedProvider.label }}</div>
+        </div>
+        <div class="flex items-center gap-2">
+          <button
+            @click="copyProviderJSON(selectedProvider)"
+            class="px-3 py-1.5 rounded-xl bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700"
+          >
+            <i class="fa-regular fa-copy mr-1"></i>复制 JSON
+          </button>
+          <button
+            @click="selectedProvider = null"
+            class="w-9 h-9 rounded-full bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700"
+          >
+            <i class="fa-solid fa-xmark"></i>
+          </button>
+        </div>
+      </div>
+
+      <div class="flex-1 overflow-y-auto px-5 py-5">
+        <!-- 状态头 -->
+        <div class="rounded-2xl p-5 border bg-gradient-to-br from-white to-gray-50 dark:from-gray-900 dark:to-gray-900/60 border-gray-200 dark:border-gray-800 mb-6">
+          <div class="flex items-start justify-between gap-4">
+            <div class="min-w-0">
+              <div class="text-sm text-gray-500 dark:text-gray-400">标签</div>
+              <div class="text-2xl font-bold text-gray-800 dark:text-white break-all">{{ selectedProvider.label }}</div>
+              <div class="mt-2 text-xs text-gray-500 dark:text-gray-400 break-all font-mono">{{ selectedProvider.id }}</div>
+            </div>
+            <span
+              class="px-3 py-1.5 rounded-full text-sm font-bold uppercase tracking-wide shrink-0 border"
+              :class="providerBadgeClass(selectedProvider)"
+            >
+              {{ selectedProvider.state }}
+            </span>
+          </div>
+
+          <div class="grid grid-cols-2 gap-3 mt-5">
+            <div class="rounded-xl bg-white dark:bg-gray-800/60 border border-gray-100 dark:border-gray-700 p-3">
+              <div class="text-xs text-gray-500">是否可选</div>
+              <div class="mt-1 font-bold" :class="selectedProvider.selectable ? 'text-green-600 dark:text-green-400' : 'text-gray-500 dark:text-gray-400'">
+                {{ selectedProvider.selectable ? '是' : '否' }}
+              </div>
+            </div>
+            <div class="rounded-xl bg-white dark:bg-gray-800/60 border border-gray-100 dark:border-gray-700 p-3">
+              <div class="text-xs text-gray-500">待处理请求</div>
+              <div class="mt-1 font-bold text-blue-600 dark:text-blue-400">{{ selectedProvider.pending_requests }}</div>
+            </div>
+            <div class="rounded-xl bg-white dark:bg-gray-800/60 border border-gray-100 dark:border-gray-700 p-3">
+              <div class="text-xs text-gray-500">优先级</div>
+              <div class="mt-1 font-bold text-gray-800 dark:text-gray-100">{{ selectedProvider.priority }}</div>
+            </div>
+            <div class="rounded-xl bg-white dark:bg-gray-800/60 border border-gray-100 dark:border-gray-700 p-3">
+              <div class="text-xs text-gray-500">冷却剩余</div>
+              <div class="mt-1 font-bold text-yellow-600 dark:text-yellow-400">{{ selectedProvider.cooldown_remaining_seconds || 0 }} 秒</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 明细 -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+          <div class="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-darkcard p-4">
+            <h3 class="font-bold text-gray-800 dark:text-white mb-3 flex items-center gap-2">
+              <i class="fa-solid fa-link text-blue-500"></i>连接信息
+            </h3>
+            <div class="space-y-2 text-sm">
+              <div class="flex justify-between gap-3">
+                <span class="text-gray-500">连接 ID</span>
+                <span class="font-mono text-right break-all text-gray-800 dark:text-gray-200">{{ selectedProvider.connection_id }}</span>
+              </div>
+              <div class="flex justify-between gap-3">
+                <span class="text-gray-500">连接时间</span>
+                <span class="text-right text-gray-800 dark:text-gray-200">{{ formatDateTime(selectedProvider.connected_at) }}</span>
+              </div>
+              <div class="flex justify-between gap-3">
+                <span class="text-gray-500">连接时长</span>
+                <span class="text-right text-gray-800 dark:text-gray-200">{{ durationSince(selectedProvider.connected_at) }}</span>
+              </div>
+              <div class="flex justify-between gap-3">
+                <span class="text-gray-500">最后活跃</span>
+                <span class="text-right text-gray-800 dark:text-gray-200">{{ formatDateTime(selectedProvider.last_seen_at) }}</span>
+              </div>
+              <div class="flex justify-between gap-3">
+                <span class="text-gray-500">活跃年龄</span>
+                <span class="text-right text-gray-800 dark:text-gray-200">{{ selectedProvider.last_seen_age_seconds }} 秒</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-darkcard p-4">
+            <h3 class="font-bold text-gray-800 dark:text-white mb-3 flex items-center gap-2">
+              <i class="fa-solid fa-bolt text-amber-500"></i>状态变化
+            </h3>
+            <div class="space-y-2 text-sm">
+              <div class="flex justify-between gap-3">
+                <span class="text-gray-500">最后状态时间</span>
+                <span class="text-right text-gray-800 dark:text-gray-200">{{ formatDateTime(selectedProvider.last_state_at) || '-' }}</span>
+              </div>
+              <div class="flex justify-between gap-3">
+                <span class="text-gray-500">状态变化</span>
+                <span class="text-right text-gray-800 dark:text-gray-200 break-all">{{ selectedProvider.last_state_change || '-' }}</span>
+              </div>
+              <div class="flex justify-between gap-3">
+                <span class="text-gray-500">状态原因</span>
+                <span class="text-right text-gray-800 dark:text-gray-200 break-all">{{ selectedProvider.last_state_reason || '-' }}</span>
+              </div>
+              <div class="flex justify-between gap-3">
+                <span class="text-gray-500">冷却截止</span>
+                <span class="text-right text-gray-800 dark:text-gray-200">{{ formatDateTime(selectedProvider.cooldown_until) || '-' }}</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-darkcard p-4">
+            <h3 class="font-bold text-gray-800 dark:text-white mb-3 flex items-center gap-2">
+              <i class="fa-solid fa-bug text-red-500"></i>错误诊断
+            </h3>
+            <div class="space-y-2 text-sm">
+              <div class="flex justify-between gap-3">
+                <span class="text-gray-500">最后错误时间</span>
+                <span class="text-right text-gray-800 dark:text-gray-200">{{ formatDateTime(selectedProvider.last_error_at) || '-' }}</span>
+              </div>
+              <div>
+                <div class="text-gray-500 mb-1">最后错误</div>
+                <div class="rounded-xl bg-red-50 dark:bg-red-950/20 border border-red-100 dark:border-red-900/40 p-3 text-red-700 dark:text-red-300 break-words text-xs">
+                  {{ selectedProvider.last_error || '无' }}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-darkcard p-4">
+            <h3 class="font-bold text-gray-800 dark:text-white mb-3 flex items-center gap-2">
+              <i class="fa-solid fa-plug-circle-xmark text-rose-500"></i>断连诊断
+            </h3>
+            <div class="space-y-2 text-sm">
+              <div class="flex justify-between gap-3">
+                <span class="text-gray-500">最后断连时间</span>
+                <span class="text-right text-gray-800 dark:text-gray-200">{{ formatDateTime(selectedProvider.last_disconnect_at) || '-' }}</span>
+              </div>
+              <div>
+                <div class="text-gray-500 mb-1">断连原因</div>
+                <div class="rounded-xl bg-rose-50 dark:bg-rose-950/20 border border-rose-100 dark:border-rose-900/40 p-3 text-rose-700 dark:text-rose-300 break-words text-xs">
+                  {{ selectedProvider.last_disconnect_reason || '无' }}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 能力与标签 -->
+        <div class="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-darkcard p-4 mb-6">
+          <h3 class="font-bold text-gray-800 dark:text-white mb-3 flex items-center gap-2">
+            <i class="fa-solid fa-toolbox text-cyan-500"></i>能力与标签
+          </h3>
+
+          <div class="mb-4">
+            <div class="text-sm text-gray-500 mb-2">能力</div>
+            <div class="flex flex-wrap gap-2">
+              <span
+                v-for="cap in formatCaps(selectedProvider.capabilities)"
+                :key="cap"
+                class="px-3 py-1 rounded-full bg-gray-100 dark:bg-gray-800 text-sm border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300"
+              >
+                {{ cap }}
+              </span>
+              <span v-if="!selectedProvider.capabilities || !selectedProvider.capabilities.length" class="text-sm text-gray-400">无</span>
+            </div>
+          </div>
+
+          <div>
+            <div class="text-sm text-gray-500 mb-2">标签</div>
+            <div class="flex flex-wrap gap-2">
+              <span
+                v-for="tag in selectedProvider.tags"
+                :key="tag"
+                class="px-3 py-1 rounded-full bg-blue-50 dark:bg-blue-950/30 text-sm border border-blue-100 dark:border-blue-900/50 text-blue-700 dark:text-blue-300"
+              >
+                {{ tag }}
+              </span>
+              <span v-if="!selectedProvider.tags || !selectedProvider.tags.length" class="text-sm text-gray-400">无标签</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 原始 Provider JSON -->
+        <div class="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-darkcard p-4">
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="font-bold text-gray-800 dark:text-white flex items-center gap-2">
+              <i class="fa-solid fa-code text-purple-500"></i>原始 Provider JSON
+            </h3>
+            <button
+              @click="copyProviderJSON(selectedProvider)"
+              class="px-3 py-1.5 rounded-xl bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700"
+            >
+              <i class="fa-regular fa-copy mr-1"></i>复制
+            </button>
+          </div>
+          <pre class="text-xs leading-6 p-4 rounded-xl bg-gray-50 dark:bg-gray-950/50 text-gray-700 dark:text-gray-300 overflow-x-auto whitespace-pre-wrap break-all border border-gray-200 dark:border-gray-700">{{ JSON.stringify(selectedProvider, null, 2) }}</pre>
+        </div>
+      </div>
+    </aside>
+  </transition>
+</div>
+
+<script>
+const { createApp, ref, computed, onMounted, onUnmounted, watch } = Vue;
+
+createApp({
+  setup() {
+    // -----------------------------
+    // State
+    // -----------------------------
+    const statusEndpoint = ref(localStorage.getItem('aigw_dashboard_endpoint') || (window.location.origin + '/'));
+    const httpKey = ref('');
+    const data = ref(null);
+    const loading = ref(false);
+    const error = ref('');
+    const isDark = ref(localStorage.getItem('aigw_dark') === 'true');
+
+    const autoRefresh = ref(localStorage.getItem('aigw_refresh') === 'true');
+    const refreshInterval = 5000;
+    const refreshProgress = ref(0);
+
+    const selectedProvider = ref(null);
+
+    const searchText = ref('');
+    const stateFilter = ref('all');
+    const sortKey = ref('state');
+    const sortDesc = ref(false);
+    const eventFilter = ref('all');
+    const rawExpanded = ref(false);
+
+    let refreshTimer = null;
+    let progressTimer = null;
+
+    // -----------------------------
+    // Safe accessors
+    // -----------------------------
+    const safeService = computed(() => (data.value && data.value.service) ? data.value.service : {});
+    const safeRouting = computed(() => (data.value && data.value.routing) ? data.value.routing : {});
+    const safeProviders = computed(() => {
+      if (!data.value || !data.value.providers) return { items: [], recent_events: [], summary: {} };
+      return {
+        items: Array.isArray(data.value.providers.items) ? data.value.providers.items : [],
+        recent_events: Array.isArray(data.value.providers.recent_events) ? data.value.providers.recent_events : [],
+        summary: data.value.providers.summary || {}
+      };
+    });
+    const safeSummary = computed(() => ({
+      active: Number(safeProviders.value.summary.active || 0),
+      connected: Number(safeProviders.value.summary.connected || 0),
+      cooling: Number(safeProviders.value.summary.cooling || 0),
+      disabled: Number(safeProviders.value.summary.disabled || 0),
+      pending_requests_total: Number(safeProviders.value.summary.pending_requests_total || 0),
+      selectable: Number(safeProviders.value.summary.selectable || 0)
+    }));
+
+    const allProviders = computed(() => safeProviders.value.items);
+    const recentEvents = computed(() => safeProviders.value.recent_events);
+
+    // -----------------------------
+    // UI helpers
+    // -----------------------------
+    const eventFilterOptions = [
+      { label: '全部', value: 'all' },
+      { label: '连接', value: 'connected' },
+      { label: '断开', value: 'disconnected' },
+      { label: '状态变化', value: 'state_changed' },
+      { label: '替换', value: 'replaced' },
+    ];
+
+    const activeCount = computed(() => allProviders.value.filter(p => p.state === 'active').length);
+    const coolingCount = computed(() => allProviders.value.filter(p => p.state === 'cooling').length);
+    const problemCount = computed(() => allProviders.value.filter(p => hasProviderIssue(p) || p.state !== 'active').length);
+
+    const recentErrorCount = computed(() => {
+      return allProviders.value.filter(p => {
+        return !!(normalizeText(p.last_error) || normalizeText(p.last_disconnect_reason) || p.state === 'cooling' || p.state === 'disabled' || p.state === 'disconnected');
+      }).length;
+    });
+
+    const eventStats = computed(() => {
+      const stats = {
+        connected: 0,
+        disconnected: 0,
+        state_changed: 0,
+        replaced: 0
+      };
+      for (const ev of recentEvents.value) {
+        if (stats[ev.type] !== undefined) stats[ev.type]++;
+      }
+      return stats;
+    });
+
+    const filteredEvents = computed(() => {
+      let arr = [...recentEvents.value];
+      if (eventFilter.value !== 'all') {
+        arr = arr.filter(ev => ev.type === eventFilter.value);
+      }
+      return arr.sort((a, b) => new Date(b.at || 0) - new Date(a.at || 0));
+    });
+
+    const groupCards = computed(() => {
+      const groups = new Map();
+
+      for (const p of allProviders.value) {
+        const key = providerGroupKey(p.label);
+        if (!groups.has(key)) {
+          groups.set(key, {
+            key,
+            total: 0,
+            active: 0,
+            cooling: 0,
+            pending: 0,
+            samples: []
+          });
+        }
+        const g = groups.get(key);
+        g.total++;
+        if (p.state === 'active') g.active++;
+        if (p.state === 'cooling') g.cooling++;
+        g.pending += Number(p.pending_requests || 0);
+
+        if (g.samples.length < 4) {
+          g.samples.push({
+            id: p.id,
+            label: p.label,
+            short: shortLabel(p.label)
+          });
+        }
+      }
+
+      return [...groups.values()].sort((a, b) => b.total - a.total || a.key.localeCompare(b.key));
+    });
+
+    const filteredProviders = computed(() => {
+      let arr = [...allProviders.value];
+
+      // search
+      const q = normalizeText(searchText.value);
+      if (q) {
+        arr = arr.filter(p => {
+          return (
+            normalizeText(p.label).includes(q) ||
+            normalizeText(p.id).includes(q) ||
+            normalizeText(p.connection_id).includes(q)
+          );
+        });
+      }
+
+      // state filter
+      switch (stateFilter.value) {
+        case 'active':
+          arr = arr.filter(p => p.state === 'active');
+          break;
+        case 'cooling':
+          arr = arr.filter(p => p.state === 'cooling');
+          break;
+        case 'disabled':
+          arr = arr.filter(p => p.state === 'disabled' || p.state === 'disconnected');
+          break;
+        case 'problem':
+          arr = arr.filter(p => hasProviderIssue(p) || p.state !== 'active');
+          break;
+        default:
+          break;
+      }
+
+      // sort
+      const stateRank = (state) => {
+        switch (state) {
+          case 'active': return 0;
+          case 'cooling': return 1;
+          case 'disabled': return 2;
+          case 'disconnected': return 3;
+          default: return 9;
+        }
+      };
+
+      arr.sort((a, b) => {
+        let result = 0;
+        switch (sortKey.value) {
+          case 'label':
+            result = normalizeText(a.label).localeCompare(normalizeText(b.label));
+            break;
+          case 'last_seen':
+            result = new Date(a.last_seen_at || 0) - new Date(b.last_seen_at || 0);
+            break;
+          case 'connected_at':
+            result = new Date(a.connected_at || 0) - new Date(b.connected_at || 0);
+            break;
+          case 'pending':
+            result = Number(a.pending_requests || 0) - Number(b.pending_requests || 0);
+            break;
+          case 'state':
+          default:
+            result = stateRank(a.state) - stateRank(b.state);
+            if (result === 0) result = normalizeText(a.label).localeCompare(normalizeText(b.label));
+            break;
+        }
+        return sortDesc.value ? -result : result;
+      });
+
+      return arr;
+    });
+
+    const refreshCountdownText = computed(() => {
+      if (!autoRefresh.value) return '';
+      const remain = Math.max(0, Math.ceil((refreshInterval * (1 - refreshProgress.value / 100)) / 1000));
+      return remain + ' 秒后刷新';
+    });
+
+    const prettyJSON = computed(() => {
+      return data.value ? JSON.stringify(data.value, null, 2) : '';
+    });
+
+    // -----------------------------
+    // Methods
+    // -----------------------------
+    function normalizeText(v) {
+      return String(v || '').trim().toLowerCase();
+    }
+
+    function providerGroupKey(label) {
+      const parts = String(label || '').split('_').filter(Boolean);
+      if (parts.length === 0) return '未分组';
+      return parts[0];
+    }
+
+    function shortLabel(label) {
+      const parts = String(label || '').split('_').filter(Boolean);
+      if (parts.length >= 2) return parts.slice(0, 2).join('_');
+      return label || '-';
+    }
+
+    function hasProviderIssue(p) {
+      if (!p) return false;
+      return Boolean(
+        normalizeText(p.last_error) ||
+        normalizeText(p.last_disconnect_reason) ||
+        normalizeText(p.last_state_reason)
+      );
+    }
+
+    function providerIssueText(p) {
+      if (!p) return '';
+      return p.last_error || p.last_disconnect_reason || p.last_state_reason || '';
+    }
+
+    function providerDotClass(p) {
+      if (!p) return 'problem';
+      if (p.state === 'active' && !hasProviderIssue(p)) return 'active';
+      if (p.state === 'cooling') return 'cooling';
+      return 'problem';
+    }
+
+    function providerCardClass(p) {
+      if (!p) return '';
+      if (p.state === 'active' && !hasProviderIssue(p)) {
+        return 'border-l-4 border-l-green-500 border-gray-100 dark:border-gray-800 dark:border-l-green-500';
+      }
+      if (p.state === 'cooling') {
+        return 'border-l-4 border-l-yellow-400 border-gray-100 dark:border-gray-800 dark:border-l-yellow-500 opacity-95';
+      }
+      return 'border-l-4 border-l-red-500 border-gray-100 dark:border-gray-800 dark:border-l-red-500';
+    }
+
+    function providerBadgeClass(p) {
+      if (!p) return '';
+      return {
+        'bg-green-50 border-green-200 text-green-700 dark:bg-green-900/30 dark:border-green-800 dark:text-green-400': p.state === 'active',
+        'bg-yellow-50 border-yellow-200 text-yellow-700 dark:bg-yellow-900/30 dark:border-yellow-800 dark:text-yellow-400': p.state === 'cooling',
+        'bg-red-50 border-red-200 text-red-700 dark:bg-red-900/30 dark:border-red-800 dark:text-red-400': p.state !== 'active' && p.state !== 'cooling'
+      };
+    }
+
+    function providerBadgeIcon(p) {
+      if (!p) return '';
+      if (p.state === 'active') return 'fa-solid fa-check mr-1';
+      if (p.state === 'cooling') return 'fa-solid fa-snowflake mr-1';
+      return 'fa-solid fa-xmark mr-1';
+    }
+
+    function eventNodeClass(ev) {
+      return {
+        'bg-green-100 text-green-600 dark:bg-green-900 dark:text-green-400': ev.type === 'connected',
+        'bg-red-100 text-red-600 dark:bg-red-900 dark:text-red-400': ev.type === 'disconnected',
+        'bg-blue-100 text-blue-600 dark:bg-blue-900 dark:text-blue-400': ev.type === 'state_changed' || ev.type === 'replaced',
+      };
+    }
+
+    function eventIconClass(ev) {
+      if (ev.type === 'connected') return 'fa-solid fa-link';
+      if (ev.type === 'disconnected') return 'fa-solid fa-link-slash';
+      return 'fa-solid fa-shuffle';
+    }
+
+    function eventProviderShort(ev) {
+      if (!ev || !ev.provider_id) return 'System';
+      const parts = String(ev.provider_id).split('-');
+      return parts[parts.length - 1] || ev.provider_id;
+    }
+
+    function formatUptime(seconds) {
+      const s = Number(seconds || 0);
+      if (!s) return '0秒';
+      const d = Math.floor(s / 86400);
+      const h = Math.floor((s % 86400) / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      const sec = s % 60;
+      const out = [];
+      if (d > 0) out.push(d + '天');
+      if (h > 0) out.push(h + '小时');
+      if (m > 0) out.push(m + '分钟');
+      if (sec > 0 || out.length === 0) out.push(sec + '秒');
+      return out.join(' ');
+    }
+
+    function formatStrategy(v) {
+      return String(v || '').replace(/_/g, ' ') || '-';
+    }
+
+    function timeAgo(dateStr) {
+      if (!dateStr) return '-';
+      const d = new Date(dateStr);
+      const diff = Math.floor((Date.now() - d.getTime()) / 1000);
+      if (diff < 0) return '刚刚';
+      if (diff < 5) return '刚刚';
+      if (diff < 60) return diff + ' 秒前';
+      if (diff < 3600) return Math.floor(diff / 60) + ' 分钟前';
+      if (diff < 86400) return Math.floor(diff / 3600) + ' 小时前';
+      return Math.floor(diff / 86400) + ' 天前';
+    }
+
+    function durationSince(dateStr) {
+      if (!dateStr) return '-';
+      const d = new Date(dateStr);
+      const diff = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
+      return formatUptime(diff);
+    }
+
+    function formatDateTime(dateStr) {
+      if (!dateStr) return '';
+      const d = new Date(dateStr);
+      if (Number.isNaN(d.getTime())) return String(dateStr);
+      const Y = d.getFullYear();
+      const M = String(d.getMonth() + 1).padStart(2, '0');
+      const D = String(d.getDate()).padStart(2, '0');
+      const h = String(d.getHours()).padStart(2, '0');
+      const m = String(d.getMinutes()).padStart(2, '0');
+      const s = String(d.getSeconds()).padStart(2, '0');
+      return Y + '-' + M + '-' + D + ' ' + h + ':' + m + ':' + s;
+    }
+
+    function formatTimeOnly(dateStr) {
+      if (!dateStr) return '';
+      const d = new Date(dateStr);
+      if (Number.isNaN(d.getTime())) return String(dateStr);
+      const h = String(d.getHours()).padStart(2, '0');
+      const m = String(d.getMinutes()).padStart(2, '0');
+      const s = String(d.getSeconds()).padStart(2, '0');
+      return h + ':' + m + ':' + s;
+    }
+
+    function formatCaps(caps) {
+      if (!Array.isArray(caps)) return [];
+      const map = {
+        'generate_content': 'Text',
+        'stream_generate_content': 'Stream',
+        'count_tokens': 'Token'
+      };
+      return caps.map(c => map[c] || c);
+    }
+
+    function normalizeResponse(json) {
+      const normalized = json || {};
+      if (!normalized.service) normalized.service = {};
+      if (!normalized.routing) normalized.routing = {};
+      if (!normalized.providers) normalized.providers = {};
+      if (!Array.isArray(normalized.providers.items)) normalized.providers.items = [];
+      if (!Array.isArray(normalized.providers.recent_events)) normalized.providers.recent_events = [];
+      if (!normalized.providers.summary) normalized.providers.summary = {};
+      return normalized;
+    }
+
+    async function fetchData() {
+      if (!httpKey.value) {
+        error.value = '请输入 HTTP 密钥';
+        return;
+      }
+
+      loading.value = true;
+      localStorage.setItem('aigw_dashboard_endpoint', statusEndpoint.value);
+      sessionStorage.setItem('aigw_dashboard_key', httpKey.value);
+      error.value = '';
+
+      try {
+        const response = await fetch(statusEndpoint.value, {
+          method: 'GET',
+          headers: {
+            'Accept': 'application/json',
+            'X-Goog-Api-Key': httpKey.value
+          }
+        });
+
+        if (!response.ok) {
+          let text = '';
+          try {
+            text = await response.text();
+          } catch (_) {}
+          throw new Error('HTTP ' + response.status + (text ? ' - ' + text : ''));
+        }
+
+        const json = await response.json();
+        const normalized = normalizeResponse(json);
+        data.value = normalized;
+
+        if (selectedProvider.value && selectedProvider.value.id) {
+          const found = normalized.providers.items.find(p => p.id === selectedProvider.value.id);
+          selectedProvider.value = found || null;
+        }
+
+        refreshProgress.value = 0;
+      } catch (e) {
+        error.value = e && e.message ? e.message : '未知错误';
+      } finally {
+        loading.value = false;
+      }
+    }
+
+    function selectProvider(provider) {
+      selectedProvider.value = provider ? { ...provider } : null;
+    }
+
+    async function copyText(text) {
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch (e) {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+    }
+
+    function copyProviderJSON(provider) {
+      if (!provider) return;
+      copyText(JSON.stringify(provider, null, 2));
+    }
+
+    function copyAllJSON() {
+      if (!data.value) return;
+      copyText(JSON.stringify(data.value, null, 2));
+    }
+
+    function applyDarkMode() {
+      if (isDark.value) {
+        document.documentElement.classList.add('dark');
+      } else {
+        document.documentElement.classList.remove('dark');
+      }
+    }
+
+    function toggleDarkMode() {
+      isDark.value = !isDark.value;
+      localStorage.setItem('aigw_dark', isDark.value ? 'true' : 'false');
+      applyDarkMode();
+    }
+
+    function startTimers() {
+      stopTimers();
+      refreshProgress.value = 0;
+
+      progressTimer = setInterval(() => {
+        refreshProgress.value += 100 / (refreshInterval / 100);
+        if (refreshProgress.value > 100) refreshProgress.value = 100;
+      }, 100);
+
+      refreshTimer = setInterval(async () => {
+        await fetchData();
+      }, refreshInterval);
+    }
+
+    function stopTimers() {
+      if (refreshTimer) clearInterval(refreshTimer);
+      if (progressTimer) clearInterval(progressTimer);
+      refreshTimer = null;
+      progressTimer = null;
+      refreshProgress.value = 0;
+    }
+
+    function toggleAutoRefresh() {
+      autoRefresh.value = !autoRefresh.value;
+      localStorage.setItem('aigw_refresh', autoRefresh.value ? 'true' : 'false');
+      if (autoRefresh.value) {
+        startTimers();
+      } else {
+        stopTimers();
+      }
+    }
+
+    function absorbUrlKeyAndClean() {
+      const url = new URL(window.location.href);
+      const keyFromQuery = url.searchParams.get('key') || url.searchParams.get('auth_token');
+      if (keyFromQuery) {
+        httpKey.value = keyFromQuery;
+        sessionStorage.setItem('aigw_dashboard_key', keyFromQuery);
+
+        url.searchParams.delete('key');
+        url.searchParams.delete('auth_token');
+        window.history.replaceState({}, '', url.toString());
+      } else {
+        const savedKey = sessionStorage.getItem('aigw_dashboard_key');
+        if (savedKey) {
+          httpKey.value = savedKey;
+        }
+      }
+    }
+
+    watch(autoRefresh, (val) => {
+      if (val) startTimers();
+      else stopTimers();
+    });
+
+    onMounted(async () => {
+      applyDarkMode();
+      absorbUrlKeyAndClean();
+
+      if (httpKey.value) {
+        await fetchData();
+        if (autoRefresh.value) {
+          startTimers();
+        }
+      }
+    });
+
+    onUnmounted(() => {
+      stopTimers();
+    });
+
+    return {
+      statusEndpoint,
+      httpKey,
+      data,
+      loading,
+      error,
+      isDark,
+      autoRefresh,
+      refreshProgress,
+      refreshCountdownText,
+      selectedProvider,
+      searchText,
+      stateFilter,
+      sortKey,
+      sortDesc,
+      eventFilter,
+      rawExpanded,
+
+      safeService,
+      safeRouting,
+      safeProviders,
+      safeSummary,
+      allProviders,
+      recentEvents,
+      activeCount,
+      coolingCount,
+      problemCount,
+      recentErrorCount,
+      eventStats,
+      filteredEvents,
+      filteredProviders,
+      eventFilterOptions,
+      groupCards,
+      prettyJSON,
+
+      fetchData,
+      toggleDarkMode,
+      toggleAutoRefresh,
+      selectProvider,
+      copyProviderJSON,
+      copyAllJSON,
+
+      hasProviderIssue,
+      providerIssueText,
+      providerDotClass,
+      providerCardClass,
+      providerBadgeClass,
+      providerBadgeIcon,
+      eventNodeClass,
+      eventIconClass,
+      eventProviderShort,
+
+      formatUptime,
+      formatStrategy,
+      timeAgo,
+      durationSince,
+      formatDateTime,
+      formatTimeOnly,
+      formatCaps,
+
+      JSON
+    };
+  }
+}).mount('#app');
+</script>
+</body>
+</html>

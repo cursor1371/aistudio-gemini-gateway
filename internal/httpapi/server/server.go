@@ -19,7 +19,9 @@ import (
 )
 
 // StatusSource 是可选的状态总览数据源接口。
-// 若 backend 实现了此接口，则 GET / 会返回生产状态总览 JSON。
+// 若 backend 实现了此接口，则：
+// 1. GET / 返回生产状态总览 JSON（需要 HTTP API 鉴权）
+// 2. GET /dashboard 返回内置可视化面板页面（无需鉴权，页面内自行携带 key 拉取 /）
 type StatusSource interface {
 	Status(ctx context.Context) (map[string]any, error)
 }
@@ -157,6 +159,8 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // 路由结构：
 //
 //	/healthz                                 -> 健康检查（无鉴权）
+//	/                                        -> 生产状态总览 JSON（HTTP 鉴权，仅 backend 支持时注册）
+//	/dashboard                               -> 内置可视化状态面板（无鉴权，仅 backend 支持时注册）
 //	/v1beta/models                           -> Gemini API（HTTP 鉴权）
 //	/v1beta/models/                          -> Gemini API（HTTP 鉴权）
 //	<websocket.path>                         -> WebSocket Provider 接入（WS 自有鉴权）
@@ -164,7 +168,8 @@ func (s *Server) buildHandler() http.Handler {
 	geminiHandler := gemini.NewHandler(s.backend, s.logger, 32<<20)
 	rootMux := http.NewServeMux()
 
-	// withCommon 返回所有路由共享的基础中间件：RequestID + Recover + 可选 AccessLog。
+	// withCommon 返回所有路由共享的基础中间件：
+	// RequestID + Recover + 可选 AccessLog。
 	withCommon := func(extra ...middleware.Middleware) []middleware.Middleware {
 		out := make([]middleware.Middleware, 0, 6)
 		out = append(out, middleware.RequestID(), middleware.Recover(s.logger))
@@ -181,10 +186,11 @@ func (s *Server) buildHandler() http.Handler {
 		withCommon(middleware.CORS(s.cfg.Access.CORS))...,
 	))
 
-	// 生产状态总览接口。
-	// GET / 返回 Provider 状态、诊断信息和最近事件。
-	// 需要通过 HTTP API 鉴权才能访问。
+	// 如果 backend 提供状态总览能力，则：
+	// 1. GET / 返回状态 JSON（需要 HTTP 鉴权）
+	// 2. GET /dashboard 返回内置监控页面（无需鉴权，仅静态页）
 	if statusSource, ok := s.backend.(StatusSource); ok {
+		// 根路径状态总览接口：需要 HTTP API 鉴权。
 		rootMux.Handle("/", middleware.Chain(
 			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				s.handleStatus(w, r, statusSource)
@@ -194,6 +200,16 @@ func (s *Server) buildHandler() http.Handler {
 				middleware.Auth(s.httpAccessManager),
 			)...,
 		))
+
+		// 内置 Dashboard：匿名可访问。
+		// 页面本身不包含敏感数据，只是静态资源；
+		// 页面内部会要求用户输入 HTTP key，并通过同源请求去拉取 GET / 的状态 JSON。
+		dashboardHandler := middleware.Chain(
+			http.HandlerFunc(s.handleDashboard),
+			withCommon()...,
+		)
+		rootMux.Handle("/dashboard", dashboardHandler)
+		rootMux.Handle("/dashboard/", dashboardHandler)
 	}
 
 	// Gemini HTTP API：需要 CORS + BodyLimit + Auth。
@@ -232,6 +248,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, payload)
 }
 
+// handleStatus 返回生产状态总览 JSON。
+// 仅精确响应 GET /。
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request, source StatusSource) {
 	// 只响应精确的 GET /，其他路径返回 404。
 	if r.URL.Path != "/" {
@@ -252,6 +270,32 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request, source Sta
 		return
 	}
 	writeJSON(w, http.StatusOK, data)
+}
+
+// handleDashboard 返回内置的监控页面。
+// 页面本身不包含敏感数据，因此允许匿名访问；
+// 页面内部会通过用户输入的 HTTP 密钥，向同源 GET / 发起鉴权请求。
+func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/dashboard" && r.URL.Path != "/dashboard/" {
+		http.NotFound(w, r)
+		return
+	}
+	if !strings.EqualFold(r.Method, http.MethodGet) {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if strings.TrimSpace(dashboardHTML) == "" {
+		http.Error(w, "dashboard asset is empty", http.StatusInternalServerError)
+		return
+	}
+
+	header := w.Header()
+	header.Set("Content-Type", "text/html; charset=utf-8")
+	header.Set("Cache-Control", "no-store")
+	header.Set("X-Frame-Options", "SAMEORIGIN")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(dashboardHTML))
 }
 
 // listenAddr 返回 HTTP 监听地址。
